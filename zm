@@ -1,0 +1,384 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local player = Players.LocalPlayer
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "AimbotProUI"
+ScreenGui.Parent = player:WaitForChild("PlayerGui")
+ScreenGui.ResetOnSpawn = false
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 320, 0, 380)
+MainFrame.Position = UDim2.new(0.5, -160, 0.5, -190)
+MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Visible = true
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = MainFrame
+
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 45)
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 8)
+TitleCorner.Parent = TitleBar
+
+local Title = Instance.new("TextLabel")
+Title.Text = "🎯 超级自瞄 Pro v6.9"
+Title.Size = UDim2.new(0.7, 0, 1, 0)
+Title.Position = UDim2.new(0.05, 0, 0, 0)
+Title.BackgroundTransparency = 1
+Title.TextColor3 = Color3.fromRGB(0, 255, 100)
+Title.TextSize = 18
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TitleBar
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Text = "✕"
+CloseBtn.Size = UDim2.new(0, 30, 0, 30)
+CloseBtn.Position = UDim2.new(0.87, 0, 0.16, 0)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(255, 60, 60)
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.TextSize = 18
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.BorderSizePixel = 0
+CloseBtn.Parent = TitleBar
+
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 6)
+CloseCorner.Parent = CloseBtn
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, -20, 1, -55)
+ContentFrame.Position = UDim2.new(0, 10, 0, 50)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = MainFrame
+
+local function createToggle(name, yPos, enabled, callback)
+    local ToggleFrame = Instance.new("Frame")
+    ToggleFrame.Size = UDim2.new(1, 0, 0, 40)
+    ToggleFrame.Position = UDim2.new(0, 0, 0, yPos)
+    ToggleFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    ToggleFrame.BorderSizePixel = 0
+    ToggleFrame.Parent = ContentFrame
+
+    local ToggleCorner = Instance.new("UICorner")
+    ToggleCorner.CornerRadius = UDim.new(0, 6)
+    ToggleCorner.Parent = ToggleFrame
+
+    local Label = Instance.new("TextLabel")
+    Label.Text = name
+    Label.Size = UDim2.new(0.65, 0, 1, 0)
+    Label.Position = UDim2.new(0.05, 0, 0, 0)
+    Label.BackgroundTransparency = 1
+    Label.TextColor3 = Color3.fromRGB(220, 220, 220)
+    Label.TextSize = 15
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = ToggleFrame
+
+    local ToggleBtn = Instance.new("TextButton")
+    ToggleBtn.Text = ""
+    ToggleBtn.Size = UDim2.new(0, 50, 0, 24)
+    ToggleBtn.Position = UDim2.new(0.8, 0, 0.2, 0)
+    ToggleBtn.BackgroundColor3 = enabled and Color3.fromRGB(0, 200, 80) or Color3.fromRGB(80, 80, 90)
+    ToggleBtn.BorderSizePixel = 0
+    ToggleBtn.AutoButtonColor = false
+    ToggleBtn.Parent = ToggleFrame
+
+    local ToggleCorner2 = Instance.new("UICorner")
+    ToggleCorner2.CornerRadius = UDim.new(0, 12)
+    ToggleCorner2.Parent = ToggleBtn
+
+    local ToggleDot = Instance.new("Frame")
+    ToggleDot.Size = UDim2.new(0, 18, 0, 18)
+    ToggleDot.Position = enabled and UDim2.new(0.58, 0, 0.125, 0) or UDim2.new(0.08, 0, 0.125, 0)
+    ToggleDot.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    ToggleDot.BorderSizePixel = 0
+    ToggleDot.Parent = ToggleBtn
+
+    local DotCorner = Instance.new("UICorner")
+    DotCorner.CornerRadius = UDim.new(0, 9)
+    DotCorner.Parent = ToggleDot
+
+    local state = enabled
+    local connection
+    local function updateUI()
+        ToggleBtn.BackgroundColor3 = state and Color3.fromRGB(0, 200, 80) or Color3.fromRGB(80, 80, 90)
+        local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        local goal = {Position = state and UDim2.new(0.58, 0, 0.125, 0) or UDim2.new(0.08, 0, 0.125, 0)}
+        TweenService:Create(ToggleDot, tweenInfo, goal):Play()
+    end
+
+    ToggleBtn.MouseButton1Click:Connect(function()
+        state = not state
+        updateUI()
+        callback(state)
+    end)
+
+    return {
+        SetState = function(newState)
+            state = newState
+            updateUI()
+        end
+    }
+end
+
+local function createSlider(name, yPos, min, max, default, callback)
+    local SliderFrame = Instance.new("Frame")
+    SliderFrame.Size = UDim2.new(1, 0, 0, 70)
+    SliderFrame.Position = UDim2.new(0, 0, 0, yPos)
+    SliderFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 50)
+    SliderFrame.BorderSizePixel = 0
+    SliderFrame.Parent = ContentFrame
+
+    local SliderCorner = Instance.new("UICorner")
+    SliderCorner.CornerRadius = UDim.new(0, 6)
+    SliderCorner.Parent = SliderFrame
+
+    local Label = Instance.new("TextLabel")
+    Label.Text = name .. ": " .. default
+    Label.Size = UDim2.new(0.9, 0, 0, 25)
+    Label.Position = UDim2.new(0.05, 0, 0.05, 0)
+    Label.BackgroundTransparency = 1
+    Label.TextColor3 = Color3.fromRGB(220, 220, 220)
+    Label.TextSize = 14
+    Label.Font = Enum.Font.Gotham
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = SliderFrame
+
+    local MinusBtn = Instance.new("TextButton")
+    MinusBtn.Text = "-"
+    MinusBtn.Size = UDim2.new(0, 25, 0, 25)
+    MinusBtn.Position = UDim2.new(0.02, 0, 0.5, 0)
+    MinusBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+    MinusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    MinusBtn.TextSize = 18
+    MinusBtn.Font = Enum.Font.GothamBold
+    MinusBtn.BorderSizePixel = 0
+    MinusBtn.Parent = SliderFrame
+
+    local MinusCorner = Instance.new("UICorner")
+    MinusCorner.CornerRadius = UDim.new(0, 4)
+    MinusCorner.Parent = MinusBtn
+
+    local SliderBg = Instance.new("Frame")
+    SliderBg.Size = UDim2.new(0.65, 0, 0, 8)
+    SliderBg.Position = UDim2.new(0.12, 0, 0.54, 0)
+    SliderBg.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+    SliderBg.BorderSizePixel = 0
+    SliderBg.Parent = SliderFrame
+
+    local SliderBgCorner = Instance.new("UICorner")
+    SliderBgCorner.CornerRadius = UDim.new(0, 4)
+    SliderBgCorner.Parent = SliderBg
+
+    local SliderFill = Instance.new("Frame")
+    SliderFill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+    SliderFill.BackgroundColor3 = Color3.fromRGB(0, 200, 80)
+    SliderFill.BorderSizePixel = 0
+    SliderFill.Parent = SliderBg
+
+    local FillCorner = Instance.new("UICorner")
+    FillCorner.CornerRadius = UDim.new(0, 4)
+    FillCorner.Parent = SliderFill
+
+    local PlusBtn = Instance.new("TextButton")
+    PlusBtn.Text = "+"
+    PlusBtn.Size = UDim2.new(0, 25, 0, 25)
+    PlusBtn.Position = UDim2.new(0.79, 0, 0.5, 0)
+    PlusBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 75)
+    PlusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    PlusBtn.TextSize = 18
+    PlusBtn.Font = Enum.Font.GothamBold
+    PlusBtn.BorderSizePixel = 0
+    PlusBtn.Parent = SliderFrame
+
+    local PlusCorner = Instance.new("UICorner")
+    PlusCorner.CornerRadius = UDim.new(0, 4)
+    PlusCorner.Parent = PlusBtn
+
+    local currentValue = default
+    local function updateValue(newValue)
+        currentValue = math.clamp(newValue, min, max)
+        SliderFill.Size = UDim2.new((currentValue - min) / (max - min), 0, 1, 0)
+        Label.Text = name .. ": " .. currentValue
+        callback(currentValue)
+    end
+
+    MinusBtn.MouseButton1Click:Connect(function()
+        updateValue(currentValue - 1)
+    end)
+
+    PlusBtn.MouseButton1Click:Connect(function()
+        updateValue(currentValue + 1)
+    end)
+
+    return {
+        SetValue = updateValue
+    }
+end
+
+local respawnToggle = createToggle("无限自动重生", 5, true, function() end)
+local teleportToggle = createToggle("随机传送", 50, true, function() end)
+local screenShakeToggle = createToggle("屏幕晃动", 95, false, function() end)
+
+local respawnSlider = createSlider("重生间隔(秒)", 145, 1, 10, 2, function() end)
+local teleportSlider = createSlider("传送间隔(秒)", 220, 1, 15, 3, function() end)
+local shakeIntensitySlider = createSlider("晃动强度", 295, 1, 10, 5, function() end)
+
+local HideBtn = Instance.new("TextButton")
+HideBtn.Text = "👁 隐藏UI"
+HideBtn.Size = UDim2.new(0, 90, 0, 35)
+HideBtn.Position = UDim2.new(0, 0, 0, 0)
+HideBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+HideBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+HideBtn.TextSize = 13
+HideBtn.Font = Enum.Font.GothamBold
+HideBtn.BorderSizePixel = 0
+HideBtn.Active = true
+HideBtn.Draggable = true
+HideBtn.Parent = ScreenGui
+
+local HideCorner = Instance.new("UICorner")
+HideCorner.CornerRadius = UDim.new(0, 6)
+HideCorner.Parent = HideBtn
+
+local uiVisible = true
+HideBtn.MouseButton1Click:Connect(function()
+    uiVisible = not uiVisible
+    MainFrame.Visible = uiVisible
+    HideBtn.Text = uiVisible and "👁 隐藏UI" or "👁 显示UI"
+end)
+
+local function getCharacter()
+    return player.Character
+end
+
+local function getHumanoid()
+    local char = getCharacter()
+    return char and char:FindFirstChild("Humanoid")
+end
+
+local function getRootPart()
+    local char = getCharacter()
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local respawnConnection
+local function startRespawn(interval)
+    if respawnConnection then
+        respawnConnection:Disconnect()
+        respawnConnection = nil
+    end
+    respawnConnection = RunService.Heartbeat:Connect(function()
+        local hum = getHumanoid()
+        if hum and hum.Health > 0 then
+            hum.Health = 0
+        end
+        task.wait(interval)
+    end)
+end
+
+local teleportConnection
+local function startTeleport(interval)
+    if teleportConnection then
+        teleportConnection:Disconnect()
+        teleportConnection = nil
+    end
+    teleportConnection = RunService.Heartbeat:Connect(function()
+        local root = getRootPart()
+        if root then
+            local offset = Vector3.new(
+                math.random(-200, 200),
+                0,
+                math.random(-200, 200)
+            )
+            root.CFrame = root.CFrame + offset
+        end
+        task.wait(interval)
+    end)
+end
+
+local shakeConnection
+local function startScreenShake(intensity)
+    if shakeConnection then
+        shakeConnection:Disconnect()
+        shakeConnection = nil
+    end
+    local camera = workspace.CurrentCamera
+    shakeConnection = RunService.RenderStepped:Connect(function()
+        if camera then
+            local shakeX = math.random(-intensity * 2, intensity * 2) / 10
+            local shakeY = math.random(-intensity * 2, intensity * 2) / 10
+            local shakeZ = math.random(-intensity, intensity) / 20
+            camera.CFrame = camera.CFrame * CFrame.Angles(shakeX, shakeY, shakeZ)
+        end
+    end)
+end
+
+respawnToggle.SetState = function(state)
+    if state then
+        startRespawn(respawnSlider and respawnSlider.GetValue and respawnSlider.GetValue() or 2)
+    else
+        if respawnConnection then
+            respawnConnection:Disconnect()
+            respawnConnection = nil
+        end
+    end
+end
+
+teleportToggle.SetState = function(state)
+    if state then
+        startTeleport(teleportSlider and teleportSlider.GetValue and teleportSlider.GetValue() or 3)
+    else
+        if teleportConnection then
+            teleportConnection:Disconnect()
+            teleportConnection = nil
+        end
+    end
+end
+
+screenShakeToggle.SetState = function(state)
+    if state then
+        startScreenShake(shakeIntensitySlider and shakeIntensitySlider.GetValue and shakeIntensitySlider.GetValue() or 5)
+    else
+        if shakeConnection then
+            shakeConnection:Disconnect()
+            shakeConnection = nil
+        end
+    end
+end
+
+respawnSlider.SetValue = function(val)
+    if respawnConnection then
+        startRespawn(val)
+    end
+end
+
+teleportSlider.SetValue = function(val)
+    if teleportConnection then
+        startTeleport(val)
+    end
+end
+
+shakeIntensitySlider.SetValue = function(val)
+    if shakeConnection then
+        startScreenShake(val)
+    end
+end
+
+startRespawn(2)
+startTeleport(3)
