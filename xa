@@ -1,0 +1,3329 @@
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local Lighting = game:GetService("Lighting")
+local StarterGui = game:GetService("StarterGui")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
+local SoundService = game:GetService("SoundService")
+local TweenService = game:GetService("TweenService")
+local TeleportService = game:GetService("TeleportService")
+local TextChatService = game:GetService("TextChatService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local MarketplaceService = game:GetService("MarketplaceService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local VirtualInputManager = Instance.new("VirtualInputManager")
+local VirtualUser = cloneref and cloneref(game:GetService("VirtualUser")) or game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
+
+local ESPLibrary = loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/ESPLibrary.lua"))()
+local UI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Library/Lua_Ware.lua"))()
+local Notify = loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Library/Notification.lua"))()
+
+local flags = UI.flags
+local connections = {}
+local guiConnections = {}
+
+local function addConnection(conn)
+    table.insert(connections, conn)
+end
+
+local function cleanup()
+    for _, conn in ipairs(connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    connections = {}
+end
+
+local function notification(title, text, duration)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = text,
+            Duration = duration or 5
+        })
+    end)
+end
+
+local screenOffsetX, screenOffsetY = (function()
+    local gui = Instance.new("ScreenGui", CoreGui)
+    gui.Enabled = false
+    local frame = Instance.new("Frame", gui)
+    local clone = gui:Clone()
+    gui.SafeAreaCompatibility = Enum.SafeAreaCompatibility.FullscreenExtension
+    gui.ScreenInsets = Enum.ScreenInsets.None
+    local dx, dy = clone.AbsolutePosition.X - gui.AbsolutePosition.X, clone.AbsolutePosition.Y - gui.AbsolutePosition.Y
+    gui:Destroy()
+    clone:Destroy()
+    return dx, dy
+end)()
+
+local isMobile = table.find({Enum.Platform.Android, Enum.Platform.IOS}, UserInputService:GetPlatform()) ~= nil
+
+local friendList = {}
+task.spawn(function()
+    local success, friends = pcall(function()
+        return LocalPlayer:GetFriendsAsync()
+    end)
+    if success and friends then
+        while true do
+            local page = friends:GetCurrentPage()
+            for _, friend in ipairs(page) do
+                table.insert(friendList, friend.Id)
+            end
+            if friends.IsFinished then break end
+            friends:AdvanceToNextPageAsync()
+        end
+    end
+end)
+
+local proximityPrompts = {}
+local clickDetectors = {}
+local touchTransmitters = {}
+local npcModels = {}
+local unanchoredParts = {}
+local partCallbacks = {}
+
+local function isNPC(model)
+    return model:IsA("Model") and model.Parent and model.Parent:IsA("Model")
+end
+
+local function canNetworkOwn(part)
+    return not part:IsGrounded() and not part.Anchored and part.ReceiveAge == 0
+end
+
+task.spawn(function()
+    for _, descendant in ipairs(workspace:GetDescendants()) do
+        if isNPC(descendant) then
+            npcModels[descendant.Parent] = true
+        end
+        if descendant:IsA("BasePart") and not descendant.Anchored then
+            table.insert(unanchoredParts, descendant)
+        else
+            if not proximityPrompts[descendant.ClassName] then
+                proximityPrompts[descendant.ClassName] = {}
+            end
+            table.insert(proximityPrompts[descendant.ClassName], descendant)
+        end
+    end
+end)
+
+workspace.DescendantAdded:Connect(function(instance)
+    if isNPC(instance) then
+        npcModels[instance.Parent] = true
+    elseif instance:IsA("BasePart") and not instance.Anchored then
+        table.insert(unanchoredParts, instance)
+    else
+        if not proximityPrompts[instance.ClassName] then
+            proximityPrompts[instance.ClassName] = {}
+        end
+        table.insert(proximityPrompts[instance.ClassName], instance)
+        for _, callback in pairs(partCallbacks) do
+            task.spawn(callback, instance)
+        end
+    end
+end)
+
+workspace.DescendantRemoving:Connect(function(instance)
+    if isNPC(instance) then
+        npcModels[instance.Parent] = nil
+    end
+end)
+
+local function getTargets(includePlayers, includeNPCs, teamCheck)
+    local targets = {}
+    if includePlayers then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and not teamCheck then
+                table.insert(targets, player.Character)
+            end
+        end
+    end
+    if includeNPCs then
+        for model, _ in pairs(npcModels) do
+            if model ~= LocalPlayer.Character then
+                table.insert(targets, model)
+            end
+        end
+    end
+    return targets
+end
+
+flags.typeofName = "用户名(UserName)"
+local playerNames = {}
+
+local function updatePlayerNames()
+    playerNames = {"All"}
+    if flags.typeofName == "用户名(UserName)" then
+        for _, player in ipairs(Players:GetChildren()) do
+            table.insert(playerNames, player.Name)
+        end
+    elseif flags.typeofName == "昵称(DisplayName)" then
+        for _, player in ipairs(Players:GetChildren()) do
+            table.insert(playerNames, player.DisplayName)
+        end
+    end
+    task.wait()
+    table.sort(playerNames, function(a, b) return a:lower() < b:lower() end)
+end
+
+updatePlayerNames()
+
+local function findPlayer(name, showError)
+    local searchName = name:gsub("%s+", "")
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Name:lower():match("^" .. searchName:lower()) or player.DisplayName:lower():match("^" .. searchName:lower()) then
+            return player
+        end
+    end
+    if showError then
+        notification("XA：错误", "未找到玩家", 5)
+    end
+    return nil
+end
+
+local flingQueue = {}
+
+local function startFling()
+    if not selectedPlayer then
+        return
+    end
+    local targetPlayers = {}
+    if selectedPlayer == "All" then
+        targetPlayers = Players:GetPlayers()
+    else
+        targetPlayers = {findPlayer(selectedPlayer)}
+    end
+    
+    local originalCFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+    local originalVelocity = LocalPlayer.Character.HumanoidRootPart.Velocity
+    local originalDestroyHeight = workspace.FallenPartsDestroyHeight
+    
+    LocalPlayer.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+    workspace.FallenPartsDestroyHeight = 0/0
+    
+    for _, target in pairs(targetPlayers) do
+        local targetChar = target.Character
+        if targetChar then
+            local humanoid = targetChar:FindFirstChildOfClass("Humanoid")
+            local hrp = targetChar:FindFirstChild("HumanoidRootPart")
+            if humanoid and hrp and humanoid.Health > 0 and target ~= LocalPlayer then
+                local startTime = tick()
+                local startPos = hrp.Position
+                Camera.CameraSubject = targetChar
+                
+                if not target[getPlayerCheck] then
+                    local function flingSequence(cframeOffset, angle)
+                        LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(hrp.Position) * cframeOffset * angle
+                        LocalPlayer.Character.HumanoidRootPart.Velocity = Vector3.new(0, 1000000, 0)
+                    end
+                    
+                    task.wait()
+                    local speed = hrp.Velocity.Magnitude
+                    local moveDir = targetChar.Humanoid.MoveDirection
+                    local angles = CFrame.Angles(math.rad(100), 0, 0)
+                    
+                    flingSequence(CFrame.new(0, 1.5, 0) + moveDir * speed / 1.25, angles)
+                    task.wait()
+                    flingSequence(CFrame.new(0, -1.5, 0) + moveDir * speed / 1.25, angles)
+                    task.wait()
+                    flingSequence(CFrame.new(2.25, 1.5, -2.25) + moveDir * speed / 1.25, angles)
+                    task.wait()
+                    flingSequence(CFrame.new(-2.25, -1.5, 2.25) + moveDir * speed / 1.25, angles)
+                    task.wait()
+                    flingSequence(CFrame.new(0, 1.5, 0) + moveDir, angles)
+                    task.wait()
+                    flingSequence(CFrame.new(0, -1.5, 0) + moveDir, angles)
+                end
+            end
+        end
+    end
+    
+    LocalPlayer.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+    if (LocalPlayer.Character.HumanoidRootPart.Position - originalCFrame.Position).Magnitude < 20 then
+        LocalPlayer.Character.HumanoidRootPart.CFrame = originalCFrame * CFrame.new(0, 0.5, 0)
+    end
+    LocalPlayer.Character.Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+    Camera.CameraSubject = LocalPlayer.Character.Humanoid
+    
+    for _, part in ipairs(LocalPlayer.Character:GetChildren()) do
+        if part:IsA("BasePart") then
+            part.Velocity = Vector3.zero
+            part.RotVelocity = Vector3.zero
+        end
+    end
+    task.wait()
+    if not LocalPlayer.Character.HumanoidRootPart then
+        workspace.FallenPartsDestroyHeight = originalDestroyHeight
+        return true
+    end
+    return (LocalPlayer.Character.HumanoidRootPart.Position - originalCFrame.Position).Magnitude < 20
+end
+
+local function validatePlayer()
+    if not selectedPlayer then
+        notification("XA：错误", "请先选择玩家", 5)
+        return true
+    end
+    if selectedPlayer ~= "All" and not Players:FindFirstChild(selectedPlayer) then
+        notification("XA：错误", "该玩家已离开", 5)
+        return true
+    end
+    return false
+end
+
+local function formatTime(seconds)
+    return string.format("%02d:%02d", math.floor(seconds / 60), seconds % 60)
+end
+
+local function sendMessage(message, useVirtualUser, skipChat)
+    if useVirtualUser then
+        local chatBar = LocalPlayer.PlayerGui.Chat.Frame.ChatBarParentFrame.Frame.BoxFrame.Frame.ChatBar
+        chatBar:SetTextFromInput(message, VirtualUser:CaptureController())
+        VirtualUser:TypeKey("0x0D", chatBar:CaptureFocus())
+    elseif not skipChat then
+        if TextChatService:FindFirstChild("TextChannels") then
+            TextChatService.TextChannels.RBXGeneral:SendAsync(message)
+        else
+            ReplicatedStorage.DefaultChatSystemChatEvents.SayMessageRequest:FireServer(message, "All")
+        end
+    end
+end
+
+local function getDirectionCFrame()
+    if flags.Direction == "前" then
+        return CFrame.new(0, 0, -flags.TPdistance)
+    elseif flags.Direction == "后" then
+        return CFrame.new(0, 0, flags.TPdistance)
+    elseif flags.Direction == "左" then
+        return CFrame.new(-flags.TPdistance, 0, 0)
+    elseif flags.Direction == "右" then
+        return CFrame.new(flags.TPdistance, 0, 0)
+    elseif flags.Direction == "上" then
+        return CFrame.new(0, flags.TPdistance, 0)
+    elseif flags.Direction == "下" then
+        return CFrame.new(0, -flags.TPdistance, 0)
+    end
+    return CFrame.new()
+end
+
+local function formatDuration(totalSeconds)
+    local hours = math.floor(totalSeconds / 3600)
+    local minutes = math.floor((totalSeconds % 3600) / 60)
+    local seconds = totalSeconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, seconds)
+end
+
+local function waitForChildOfClass(parent, className)
+    local child = parent:FindFirstChildOfClass(className)
+    if child then return child end
+    while parent.Parent do
+        local newChild = parent.ChildAdded:Wait()
+        if newChild:IsA(className) then
+            return newChild
+        end
+    end
+    return nil
+end
+
+local fovCircle = Drawing.new("Circle")
+fovCircle.Thickness = 2
+fovCircle.Color = Color3.fromRGB(255, 255, 255)
+fovCircle.Filled = false
+fovCircle.Radius = 60
+fovCircle.Position = Camera.ViewportSize / 2
+fovCircle.Visible = false
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Parent = CoreGui
+
+local targetBox = Instance.new("Frame", screenGui)
+targetBox.BackgroundColor3 = Color3.fromRGB(85, 170, 255)
+targetBox.Size = UDim2.new(0, 15, 0, 15)
+targetBox.Visible = false
+
+local targetText = Instance.new("TextLabel", screenGui)
+targetText.Size = UDim2.new(0, 50, 0, 10)
+targetText.Position = UDim2.new(0, 100, 0, 50)
+targetText.TextSize = 16
+targetText.Font = Enum.Font.SourceSansBold
+targetText.Text = "当前瞄准：无"
+targetText.TextColor3 = Color3.new(1, 1, 1)
+targetText.TextStrokeColor3 = Color3.new(0, 0, 0)
+targetText.TextStrokeTransparency = 0.6
+targetText.BackgroundTransparency = 1
+targetText.ZIndex = 50
+targetText.Visible = false
+
+local targetCorner = Instance.new("UICorner")
+targetCorner.Parent = targetBox
+targetCorner.CornerRadius = UDim.new(0, 10)
+
+local targetStroke = Instance.new("UIStroke")
+targetStroke.Parent = targetBox
+targetStroke.Thickness = 1.5
+targetStroke.Color = Color3.fromRGB(255, 255, 255)
+
+local tracerLine = Drawing.new("Line")
+tracerLine.Color = Color3.new(1, 1, 1)
+tracerLine.Thickness = 1
+tracerLine.Visible = false
+
+local crosshairH = Drawing.new("Line")
+crosshairH.Color = Color3.new(1, 1, 1)
+crosshairH.Thickness = 1
+crosshairH.Visible = false
+
+local crosshairV = Drawing.new("Line")
+crosshairV.Color = Color3.new(1, 1, 1)
+crosshairV.Thickness = 1
+crosshairV.Visible = false
+
+local center = Camera.ViewportSize / 2
+crosshairH.From = Vector2.new(center.X - 10, center.Y)
+crosshairH.To = Vector2.new(center.X + 10, center.Y)
+crosshairV.From = Vector2.new(center.X, center.Y - 10)
+crosshairV.To = Vector2.new(center.X, center.Y + 10)
+
+local shootButton = Instance.new("TextButton", screenGui)
+shootButton.Text = "射击"
+shootButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+shootButton.BackgroundColor3 = Color3.fromRGB(31, 31, 31)
+shootButton.BackgroundTransparency = 0.5
+shootButton.Position = UDim2.new(0, 645, 0, 165)
+shootButton.Size = UDim2.new(0, 55, 0, 55)
+shootButton.Draggable = true
+shootButton.Visible = false
+shootButton.ZIndex = 5
+Instance.new("UICorner", shootButton)
+
+local aimbotToggle = Instance.new("TextButton", screenGui)
+aimbotToggle.TextSize = 10
+aimbotToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+aimbotToggle.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+aimbotToggle.BackgroundTransparency = 0.5
+aimbotToggle.Size = UDim2.new(0, 48, 0, 48)
+aimbotToggle.Text = "OFF"
+aimbotToggle.Position = UDim2.new(0, 16, 0, 48)
+aimbotToggle.Draggable = true
+aimbotToggle.Visible = false
+Instance.new("UICorner", aimbotToggle)
+
+local aimbotConfig = {
+    Enabled = false,
+    FovPosition = "准星",
+    LockMethod = "相机",
+    AimPart = "Head",
+    TeamCheck = false,
+    WallCheck = false,
+    AliveCheck = false,
+    MaxDistance = 400,
+    Smoothness = 0.6,
+    Prediction = 0.15,
+    Targets = {Players = true, NPCs = false},
+    FacingWhenAimbot = false
+}
+
+local bulletTrackConfig = {
+    Enabled = false,
+    Method = "Raycast",
+    HitChance = 100,
+    Wallbang = false,
+    ShowTarget = false
+}
+
+local autoClickerConfig = {
+    Enabled = false,
+    DelayAmount = 0
+}
+
+local function applyAimbot(target)
+    if not target then return end
+    
+    if aimbotConfig.LockMethod == "鼠标" then
+        local mousePos = UserInputService:GetMouseLocation()
+        local screenPos = Camera:WorldToViewportPoint(target.Position + target.Velocity * aimbotConfig.Prediction)
+        local delta = Vector2.new(screenPos.X, screenPos.Y) - Vector2.new(mousePos.X, mousePos.Y)
+        mousemoverel(delta.X * aimbotConfig.Smoothness, delta.Y * aimbotConfig.Smoothness)
+    elseif aimbotConfig.LockMethod == "相机" then
+        local lookAt = CFrame.lookAt(Camera.CFrame.Position, Camera.CFrame.Position + (target.Position + target.Velocity * aimbotConfig.Prediction - Camera.CFrame.Position).Unit)
+        if aimbotConfig.Smoothness > 0 then
+            Camera.CFrame = Camera.CFrame:Lerp(lookAt, aimbotConfig.Smoothness)
+        else
+            Camera.CFrame = lookAt
+        end
+    else
+        local screenPos = Camera:WorldToViewportPoint(target.Position + target.Velocity * aimbotConfig.Prediction)
+        local viewCenter = Camera.ViewportSize / 2
+        if screenPos then
+            local delta = Vector2.new(screenPos.X, screenPos.Y) - viewCenter
+            VirtualInputManager:SendTouchEvent(1, 0, 0, 0)
+            VirtualInputManager:SendTouchEvent(1, 1, delta.X * aimbotConfig.Smoothness, delta.Y * aimbotConfig.Smoothness)
+            VirtualInputManager:SendTouchEvent(1, 2, delta.X * aimbotConfig.Smoothness, delta.Y * aimbotConfig.Smoothness)
+        end
+        if aimbotConfig.FacingWhenAimbot then
+            LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(LocalPlayer.Character.HumanoidRootPart.Position, target.Position)
+        end
+    end
+end
+
+local function checkWall(target, ignoreList)
+    if not aimbotConfig.WallCheck then
+        return true
+    end
+    local origin = Camera.CFrame.Position
+    return workspace:FindPartOnRayWithIgnoreList(Ray.new(origin, target.Position - origin), ignoreList) == nil
+end
+
+local validAimParts = {"Head", "HumanoidRootPart"}
+
+local currentTarget = nil
+local closestDistance = math.huge
+
+local function findBestTarget()
+    closestDistance = math.huge
+    local targets = getTargets(aimbotConfig.Targets.Players, aimbotConfig.Targets.NPCs, aimbotConfig.TeamCheck)
+    
+    for _, target in pairs(targets) do
+        if target and LocalPlayer.Character and LocalPlayer.Character.HumanoidRootPart then
+            local aimPart = target:FindFirstChild(aimbotConfig.AimPart == "随机" and validAimParts[math.random(2)] or aimbotConfig.AimPart)
+            if aimPart then
+                local inRange = (LocalPlayer.Character.HumanoidRootPart.Position - aimPart.Position).Magnitude < aimbotConfig.MaxDistance
+                if not aimbotConfig.AliveCheck then
+                    inRange = true
+                end
+                if aimPart and inRange then
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(aimPart.Position)
+                    if onScreen then
+                        local fovCenter = aimbotConfig.FovPosition == "准星" and Camera.ViewportSize / 2 or UserInputService:GetMouseLocation()
+                        local distance = (fovCenter - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
+                        if distance <= fovCircle.Radius then
+                            local visible = checkWall(aimPart, {LocalPlayer.Character, target})
+                            if distance < closestDistance and visible then
+                                currentTarget = aimPart
+                                closestDistance = distance
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return currentTarget
+end
+
+addConnection(RunService.RenderStepped:Connect(function()
+    local target = findBestTarget()
+    if aimbotConfig.Enabled then
+        applyAimbot(target)
+    end
+    
+    local fovPos = aimbotConfig.FovPosition == "准星" and Camera.ViewportSize / 2 or UserInputService:GetMouseLocation()
+    if fovCircle.Visible then
+        fovCircle.Position = fovPos
+    end
+    
+    if bulletTrackConfig.ShowTarget and target then
+        local screenPos = Camera:WorldToScreenPoint(target.Position)
+        if screenPos then
+            targetBox.Position = UDim2.new(0, screenPos.X - targetBox.AbsoluteSize.X / 2, 0, screenPos.Y - targetBox.AbsoluteSize.Y / 2)
+            targetBox.Visible = true
+            targetText.Text = "当前瞄准：" .. target.Parent.Name
+        else
+            targetBox.Visible = false
+            targetText.Text = "当前瞄准：无"
+        end
+    else
+        targetBox.Visible = false
+        targetText.Text = "当前瞄准：无"
+    end
+    
+    if flags.TargetLine and target then
+        local screenPos = Camera:WorldToViewportPoint(target.Position)
+        if screenPos then
+            tracerLine.From = fovPos
+            tracerLine.To = Vector2.new(screenPos.X, screenPos.Y)
+            tracerLine.Visible = true
+        end
+    end
+end))
+
+shootButton.MouseButton1Click:Connect(function()
+    if not currentTarget then return end
+    local screenPos = Camera:WorldToViewportPoint(currentTarget.Position)
+    if screenPos then
+        local touchId = math.random(999)
+        VirtualInputManager:SendTouchEvent(touchId, 0, screenPos.X + screenOffsetX, screenPos.Y)
+        VirtualInputManager:SendTouchEvent(touchId, 2, screenPos.X + screenOffsetX, screenPos.Y)
+    end
+end)
+
+local function capitalize(str)
+    return str:sub(1, 1):upper() .. str:sub(2)
+end
+
+bulletTrackConfig.Init = function()
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Include
+    
+    local originalNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local method = capitalize(getnamecallmethod())
+        if not checkcaller() and bulletTrackConfig.Enabled and bulletTrackConfig.Method == method and math.random(1, 100) <= bulletTrackConfig.HitChance then
+            if self == workspace and method == "Raycast" then
+                local args = {...}
+                if currentTarget then
+                    local direction = (currentTarget.Position - args[1]).Unit
+                    local length = (flags.RayLength == "1000" and 1000 or args[2].Magnitude)
+                    args[2] = direction * length
+                end
+                if bulletTrackConfig.Wallbang and currentTarget then
+                    raycastParams.FilterDescendantsInstances = {currentTarget}
+                    args[3] = raycastParams
+                end
+                return originalNamecall(self, unpack(args))
+            elseif self == workspace and method:match("FindPartOnRay") then
+                local args = {...}
+                local origin = args[1].Origin
+                if currentTarget then
+                    local direction = (currentTarget.Position - origin).Unit
+                    local length = (flags.RayLength == "1000" and 1000 or args[1].Direction.Magnitude)
+                    args[1] = Ray.new(origin, direction * length)
+                end
+                if bulletTrackConfig.Wallbang and currentTarget then
+                    return workspace:FindPartOnRayWithWhitelist(args[1], {currentTarget})
+                end
+                return originalNamecall(self, unpack(args))
+            elseif self == Camera and method:match("PointToRay") then
+                if table.find({"ControlScript", "ControlModule"}, tostring(getcallingscript())) then
+                    return originalNamecall(self, ...)
+                end
+                local cameraPos = Camera.CFrame.Position
+                local direction = (currentTarget.Position - cameraPos).Unit
+                local args = {...}
+                local distance = args[3] or 0
+                return Ray.new(cameraPos + (distance > 0 and direction * distance or Vector3.zero), direction)
+            end
+        end
+        return originalNamecall(self, ...)
+    end))
+    
+    local originalIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
+        if not checkcaller() and bulletTrackConfig.Enabled and math.random(1, 100) <= bulletTrackConfig.HitChance and currentTarget then
+            if self:IsA("Mouse") and bulletTrackConfig.Method == "Mouse.Hit/Target" then
+                local lowerKey = key:lower()
+                if lowerKey == "target" then
+                    return currentTarget.Parent
+                elseif lowerKey == "hit" then
+                    return currentTarget.CFrame + currentTarget.Velocity * aimbotConfig.Prediction
+                end
+            elseif self == Camera and bulletTrackConfig.Method == "Camera.CFrame" and (key == "CFrame" or key == "CoordinateFrame") then
+                if tostring(getcallingscript()) == "CameraModule" then
+                    return originalIndex(self, key)
+                end
+                return CFrame.new(originalIndex(self, key).Position, currentTarget.Position)
+            end
+        end
+        return originalIndex(self, key)
+    end))
+    
+    local originalRayNew = hookfunction(Ray.new, function(origin, direction)
+        if not checkcaller() and bulletTrackConfig.Enabled and bulletTrackConfig.Method == "Ray.new" and math.random(1, 100) <= bulletTrackConfig.HitChance then
+            if currentTarget then
+                return originalRayNew(origin, (currentTarget.Position - origin).Unit * (flags.RayLength == "1000" and 1000 or direction.Magnitude))
+            end
+        end
+        return originalRayNew(origin, direction)
+    end)
+end
+
+local menu = UI:CreateWindow("XA Hub", {
+    Subtitle = "脚本作者 无解 | QQ:3490168468",
+    Icon = "104645605199482",
+    Keybind = Enum.KeyCode.RightControl
+})
+
+local mainTab = menu:Tab("通用", "6035145364")
+
+local infoSection = mainTab:Section("信息", false)
+infoSection:Label("您的用户名：" .. LocalPlayer.Name)
+infoSection:Label("您的昵称：" .. LocalPlayer.DisplayName)
+infoSection:Label("UserId：" .. LocalPlayer.UserId)
+infoSection:Label("账号年龄：" .. LocalPlayer.AccountAge)
+infoSection:Label("注入器名称：" .. identifyexecutor())
+infoSection:Label("注入器等级：" .. (getthreadidentity or function() return "未知" end)())
+
+local serverNameLabel = infoSection:Label("服务器名称：加载中")
+task.spawn(function()
+    local success, result = pcall(function()
+        return MarketplaceService:GetProductInfo(game.PlaceId).Name
+    end)
+    serverNameLabel.Text = success and result or "无法获取"
+end)
+
+flags.CurrentPlayers = infoSection:Label("当前玩家数：加载中")
+infoSection:Label("最大玩家数：" .. Players.MaxPlayers)
+flags.RunTime = infoSection:Label("运行时间：加载中")
+infoSection:Label("GameId：" .. game.GameId)
+infoSection:Label("PlaceId：" .. game.PlaceId)
+infoSection:Label("JobId：" .. game.JobId)
+flags.CurrentPing = infoSection:Label("延迟：加载中")
+
+local pingStartTime = tick()
+local pingWarned = false
+
+addConnection(flags.CurrentPing:GetPropertyChangedSignal("Text"):Connect(function()
+    pingStartTime = tick()
+    pingWarned = false
+end))
+
+local playerSelectSection = mainTab:Section("选择玩家", false)
+playerSelectSection:Label("提示：All代表所有人")
+
+playerSelectSection:Dropdown("名称类型", "typeofName", {
+    "用户名(UserName)",
+    "昵称(DisplayName)"
+}, 2, function(value)
+    flags.typeofName = value
+    updatePlayerNames()
+    playerDropdown:SetOptions(playerNames)
+end)
+
+local playerDropdown = playerSelectSection:Dropdown("选择玩家", "Dropdown", playerNames, function(value)
+    if value == "All" then
+        tpDelayUI.Visible = true
+    else
+        tpDelayUI.Visible = false
+    end
+    if flags.typeofName == "昵称(DisplayName)" then
+        for _, player in ipairs(Players:GetChildren()) do
+            if player.DisplayName == value then
+                selectedPlayer = player.Name
+                break
+            end
+        end
+    else
+        selectedPlayer = value
+    end
+end)
+
+playerSelectSection:Button("传送", function()
+    if validatePlayer() then return end
+    if selectedPlayer == "All" then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player.Character then
+                LocalPlayer.Character:PivotTo(player.Character:GetPivot())
+                task.wait(teleportDelay)
+            end
+        end
+    else
+        local target = Players[selectedPlayer]
+        if target and target.Character then
+            LocalPlayer.Character:PivotTo(target.Character:GetPivot())
+        end
+    end
+end)
+
+local tpDelaySlider = playerSelectSection:Slider("传送延迟", teleportDelay or 0.5, 0, 5, true, function(value)
+    teleportDelay = value
+end)
+tpDelayUI = tpDelaySlider
+
+local tpDelayUIFrame = tpDelaySlider
+tpDelayUIFrame.Visible = false
+
+playerSelectSection:Button("飞升", function()
+    if validatePlayer() then return end
+    startFling()
+end)
+
+playerSelectSection:Toggle("连续飞升", false, function(value)
+    if value then
+        if validatePlayer() then return end
+        local flingResult = startFling() == true
+        while not flingResult do
+            if flingResult then
+                task.wait(0.5)
+            end
+            break
+        end
+        flags.LoopFling = flingResult
+    end
+end)
+
+playerSelectSection:Toggle("定身", false, function(value)
+    if value then
+        if validatePlayer() then return end
+        if selectedPlayer == "All" then
+            notification("XA：错误", "暂不支持用All", 5)
+            return
+        end
+    end
+end)
+
+playerSelectSection:Toggle("锁定玩家", false)
+
+playerSelectSection:Toggle("按住玩家", false, function(value)
+    if not value then
+        savedPositions = {}
+    end
+end)
+
+playerSelectSection:Dropdown("方向", {"前", "后", "左", "右", "上", "下"}, 2)
+playerSelectSection:Slider("TP距离", 5, 0, 30, false)
+playerSelectSection:Toggle("镜头跟随", false, function(value)
+    if value then
+        if validatePlayer() then return end
+        if selectedPlayer == "All" then
+            notification("XA：错误", "暂不支持用All", 5)
+            return
+        end
+        local targetChar = Players[selectedPlayer].Character
+        Camera.CameraSubject = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+    else
+        Camera.CameraSubject = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    end
+end)
+
+addConnection(Players.PlayerAdded:Connect(function(player)
+    updatePlayerNames()
+    playerDropdown:SetOptions(playerNames)
+end))
+
+addConnection(Players.PlayerRemoving:Connect(function(player)
+    if flags.typeofName == "用户名(UserName)" then
+        playerDropdown:RemoveOption(player.Name)
+    elseif flags.typeofName == "昵称(DisplayName)" then
+        playerDropdown:RemoveOption(player.DisplayName)
+    end
+end))
+
+local playerSettingsSection = mainTab:Section("玩家设置", false)
+
+playerSettingsSection:Slider("移动速度", LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed or 16, 0, 500, false, function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.WalkSpeed = value
+        end
+    end
+end)
+
+playerSettingsSection:Textbox("移动速度", LocalPlayer.Character and tostring(LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed) or "16", function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.WalkSpeed = tonumber(value) or 16
+        end
+    end
+end)
+
+playerSettingsSection:Toggle("无限跳跃", false)
+playerSettingsSection:Slider("跳跃高度", 0, 0, 200, true)
+playerSettingsSection:Toggle("超级跳", false)
+playerSettingsSection:Slider("跳跃倍率", 0, 0, 200, true)
+playerSettingsSection:Slider("跳跃力量", LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid").JumpPower or 50, 0, 500, false, function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.JumpPower = value
+        end
+    end
+end)
+
+playerSettingsSection:Textbox("跳跃力量", LocalPlayer.Character and tostring(LocalPlayer.Character:FindFirstChildOfClass("Humanoid").JumpPower) or "50", function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.JumpPower = tonumber(value) or 50
+        end
+    end
+end)
+
+playerSettingsSection:Toggle("使用跳跃力量", false, function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.UseJumpPower = value
+        end
+    end
+end)
+
+playerSettingsSection:Slider("飞行速度", 0, 0, 200, true)
+playerSettingsSection:Slider("滑翔速度", LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid").HipHeight or 2, 0, 200, false, function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.HipHeight = value
+        end
+    end
+end)
+
+playerSettingsSection:Textbox("滑翔速度", LocalPlayer.Character and tostring(LocalPlayer.Character:FindFirstChildOfClass("Humanoid").HipHeight) or "2", function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.HipHeight = tonumber(value) or 2
+        end
+    end
+end)
+
+playerSettingsSection:Slider("最大倾斜角度", LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid").MaxSlopeAngle or 89, 0, 90, false, function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.MaxSlopeAngle = value
+        end
+    end
+end)
+
+playerSettingsSection:Slider("视野范围", Camera.FieldOfView, 0, 120, true, function(value)
+    Camera.FieldOfView = value
+end)
+
+playerSettingsSection:Textbox("视野范围", tostring(Camera.FieldOfView), function(value)
+    Camera.FieldOfView = tonumber(value) or 70
+end)
+
+playerSettingsSection:Toggle("无坠落伤害", false)
+playerSettingsSection:Slider("重力", workspace.Gravity, 0, 200, false, function(value)
+    workspace.Gravity = value
+end)
+
+playerSettingsSection:Textbox("重力", tostring(workspace.Gravity), function(value)
+    workspace.Gravity = tonumber(value) or 196.2
+end)
+
+playerSettingsSection:Textbox("相机最大距离", tostring(LocalPlayer.CameraMaxZoomDistance), function(value)
+    LocalPlayer.CameraMaxZoomDistance = tonumber(value) or 400
+end)
+
+playerSettingsSection:Textbox("最大血量", function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.MaxHealth = tonumber(value) or 100
+        end
+    end
+end)
+
+playerSettingsSection:Textbox("血量", function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.Health = tonumber(value) or 100
+        end
+    end
+end)
+
+playerSettingsSection:Dropdown("相机类型", {
+    "Custom",
+    "Attach",
+    "Fixed",
+    "Follow",
+    "Watch",
+    "Scriptable",
+    "Track",
+    "FirstPerson",
+    "ThirdPerson"
+}, function(value)
+    Camera.CameraType = Enum.CameraType[value]
+end)
+
+playerSettingsSection:Dropdown("相机模式", {"Classic", "LockFirstPerson"}, function(value)
+    LocalPlayer.CameraMode = value
+end)
+
+playerSettingsSection:Toggle("相机穿透", false, function(value)
+    LocalPlayer.DevCameraOcclusionMode = value and Enum.DevCameraOcclusionMode.Invisicam or Enum.DevCameraOcclusionMode.Zoom
+end)
+
+local freecam = nil
+local freecamEnabled = false
+local originalCameraType = nil
+
+local function loadFreecam()
+    freecam = loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/Freecam.lua"))(screenGui)
+end
+
+loadFreecam()
+
+playerSettingsSection:Toggle("自由相机", false, function(value)
+    if value then
+        if freecam then
+            freecam()
+        end
+    else
+        if freecam and freecam.stop then
+            freecam.stop()
+        end
+    end
+end)
+
+playerSettingsSection:Textbox("自由相机速度", function(value)
+    if freecam and freecam.setSpeed then
+        freecam.setSpeed(tonumber(value))
+    end
+end)
+
+playerSettingsSection:Toggle("自动跳跃", LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid").AutoJumpEnabled or false, function(value)
+    if LocalPlayer.Character then
+        local humanoid = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.AutoJumpEnabled = value
+        end
+    end
+end)
+
+playerSettingsSection:Button("刷新角色", function()
+    if LocalPlayer.Character then
+        notification("XA：提示", "已检测到角色", 5)
+        LocalPlayer.Character = LocalPlayer.Character
+        local humanoid = LocalPlayer.Character:WaitForChild("Humanoid")
+        local hrp = LocalPlayer.Character:WaitForChild("HumanoidRootPart")
+    else
+        notification("XA：提示", "没有检测到角色", 5)
+    end
+end)
+
+local utilitySection = mainTab:Section("工具", false)
+
+utilitySection:Button("飞行Gui V3", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Content/FlyGuiV3"))()
+end)
+
+utilitySection:Button("绕过闲置", function()
+    for _, conn in ipairs(getconnections(LocalPlayer.Idled)) do
+        if conn.Disable then
+            conn:Disable()
+        elseif conn.Disconnect then
+            conn:Disconnect()
+        end
+    end
+end)
+
+utilitySection:Button("Delta键盘", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/DeltaKeyBoard.lua"))()
+end)
+
+utilitySection:Button("创建工具", function()
+    local copyBin = Instance.new("HopperBin")
+    copyBin.Name = "复制"
+    copyBin.BinType = 3
+    copyBin.Parent = LocalPlayer.Backpack
+    local deleteBin = Instance.new("HopperBin")
+    deleteBin.Name = "删除"
+    deleteBin.BinType = 4
+    deleteBin.Parent = LocalPlayer.Backpack
+end)
+
+utilitySection:Button("Infinite Yield", function()
+    loadstring(game:GetObjects("rbxassetid://6695644299")[1].Source)()
+end)
+
+utilitySection:Button("BB+", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/boyscp/scriscriptsc/main/bbn.lua"))()
+end)
+
+utilitySection:Button("重新加入", function()
+    if #Players:GetPlayers() <= 1 then
+        LocalPlayer:Kick("重新加入中...")
+        wait()
+        TeleportService:Teleport(game.PlaceId, LocalPlayer)
+    else
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end
+end)
+
+utilitySection:Button("复制重连代码", function()
+    setclipboard(string.format("game:GetService(\"TeleportService\"):Teleport(%d, game:GetService(\"Players\").LocalPlayer)", game.PlaceId))
+end)
+
+utilitySection:Button("复制重连实例代码", function()
+    setclipboard(string.format("game:GetService(\"TeleportService\"):TeleportToPlaceInstance(%d, \"%s\", game:GetService(\"Players\").LocalPlayer)", game.PlaceId, game.JobId))
+end)
+
+utilitySection:Button("复制CFrame", function()
+    if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        setclipboard("CFrame.new(" .. tostring(LocalPlayer.Character.HumanoidRootPart.Position) .. ")")
+    end
+end)
+
+utilitySection:Button("Shiftlock", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/Shiftlock.lua"))()
+end)
+
+utilitySection:Button("高画质", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Content/HighQuality"))()
+end)
+
+utilitySection:Button("图形设置", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/MZEEN2424/Graphics/main/Graphics.xml"))()
+end)
+
+utilitySection:Toggle("全亮", false, function(value)
+    if not value then
+        Lighting.Ambient = Color3.new(0, 0, 0)
+    end
+    for _, effect in ipairs(Lighting:GetDescendants()) do
+        if effect:IsA("PostEffect") then
+            effect.Enabled = not value
+        end
+    end
+end)
+
+utilitySection:Toggle("去雾", false, function(value)
+    Lighting.FogEnd = 100000
+    for _, atmosphere in ipairs(Lighting:GetDescendants()) do
+        if atmosphere:IsA("Atmosphere") then
+            atmosphere:Destroy()
+        end
+    end
+end)
+
+utilitySection:Toggle("无阴影", false, function(value)
+    Lighting.GlobalShadows = not value
+end)
+
+utilitySection:Toggle("飞行模式", false, function(value)
+    if value then
+        LocalPlayer.Character.Humanoid:ChangeState("Flying")
+    end
+end)
+
+utilitySection:Toggle("无触碰", false, function(value)
+    if not value then
+        for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanTouch = true
+            end
+        end
+    end
+end)
+
+utilitySection:Button("载具飞行", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Content/VehicleFly"))()
+end)
+
+local dragPart = Instance.new("Part")
+dragPart.Name = "_DragPart"
+dragPart.Anchored = true
+dragPart.CanCollide = false
+dragPart.Transparency = 1
+local dragAttachment = Instance.new("Attachment", dragPart)
+local dragging = false
+
+local dragUI = Instance.new("Frame", screenGui)
+dragUI.Position = UDim2.new(1, -95, 1, -90)
+dragUI.Size = UDim2.new(0, 70, 0, 70)
+dragUI.BackgroundTransparency = 1
+dragUI.Visible = false
+
+local throwBtn = Instance.new("ImageButton", dragUI)
+throwBtn.Position = UDim2.new(-0.007, 0, -0.957, 0)
+throwBtn.Size = UDim2.new(0.59, 0, 0.59, 0)
+throwBtn.Image = "rbxassetid://121117383391041"
+throwBtn.BackgroundTransparency = 1
+local throwText = Instance.new("TextLabel", throwBtn)
+throwText.Position = UDim2.new(0.5, 0, 0.5, 0)
+throwText.AnchorPoint = Vector2.new(0.5, 0.5)
+throwText.Size = UDim2.new(0.7, 0, 0.7, 0)
+throwText.TextSize = 14
+throwText.Text = "扔"
+throwText.TextColor3 = Color3.new(1, 1, 1)
+throwText.BackgroundTransparency = 1
+
+local detachBtn = Instance.new("ImageButton", dragUI)
+detachBtn.Position = UDim2.new(-0.787, 0, -0.578, 0)
+detachBtn.Size = UDim2.new(0.59, 0, 0.59, 0)
+detachBtn.Image = "rbxassetid://121117383391041"
+detachBtn.BackgroundTransparency = 1
+local detachText = Instance.new("TextLabel", detachBtn)
+detachText.Position = UDim2.new(0.5, 0, 0.5, 0)
+detachText.AnchorPoint = Vector2.new(0.5, 0.5)
+detachText.Size = UDim2.new(0.7, 0, 0.7, 0)
+detachText.TextSize = 14
+detachText.Text = "卸下"
+detachText.TextColor3 = Color3.new(1, 1, 1)
+detachText.BackgroundTransparency = 1
+
+local function startDrag(part)
+    draggedPart = part
+    dragging = true
+    part.CanCollide = false
+    dragUI.Visible = true
+    
+    if part:FindFirstChild("Attachment") then
+        part.Attachment:Destroy()
+    end
+    if part:FindFirstChild("AlignPosition") then
+        part.AlignPosition:Destroy()
+    end
+    if part:FindFirstChild("Torque") then
+        part.Torque:Destroy()
+    end
+    
+    local newAttachment = Instance.new("Attachment", part)
+    local alignPos = Instance.new("AlignPosition", part)
+    alignPos.MaxForce = 1000000000
+    alignPos.MaxVelocity = math.huge
+    alignPos.Responsiveness = 200
+    alignPos.Attachment0 = newAttachment
+    alignPos.Attachment1 = dragAttachment
+    
+    local highlight = Instance.new("Highlight", part)
+    highlight.FillTransparency = 1
+    highlight.OutlineColor = Color3.new(1, 1, 1)
+    
+    if flags.ObjectTorque then
+        local torque = Instance.new("Torque", part)
+        torque.Torque = Vector3.new(1000000, 1000000, 1000000)
+        torque.Attachment0 = newAttachment
+        draggedTorque = torque
+    end
+    
+    local function stopDrag()
+        dragging = false
+        part.CanCollide = true
+        dragUI.Visible = false
+        if flags.ObjectTorque then
+            part.AssemblyLinearVelocity = Vector3.zero
+            part.AssemblyAngularVelocity = Vector3.zero
+            if draggedTorque then draggedTorque:Destroy() end
+        end
+        newAttachment:Destroy()
+        alignPos:Destroy()
+        highlight:Destroy()
+    end
+    
+    local function throwPart()
+        stopDrag()
+        part.Velocity = Camera.CFrame.LookVector * flags.ThrowStrength
+    end
+    
+    throwBtn.MouseButton1Click:Connect(throwPart)
+    detachBtn.MouseButton1Click:Connect(stopDrag)
+    
+    local dragDistance = (LocalPlayer.Character.HumanoidRootPart.Position - part:GetPivot().Position).Magnitude - 1.5
+    
+    task.spawn(function()
+        while true do
+            if not part.Parent or not canNetworkOwn(part) then
+                stopDrag()
+                break
+            end
+            if not dragging then break end
+            
+            local head = LocalPlayer.Character:FindFirstChild("Head")
+            if head then
+                dragAttachment.WorldCFrame = Camera.CFrame * CFrame.new(0, 0, -dragDistance)
+            else
+                if isMobile then
+                    dragAttachment.WorldCFrame = CFrame.lookAlong(LocalPlayer.Character.HumanoidRootPart.Position, Camera.CFrame.LookVector * Vector3.new(1, 0, 1)) * CFrame.new(3, 0, -8)
+                else
+                    dragAttachment.WorldCFrame = CFrame.new(Mouse.UnitRay.Origin + Mouse.UnitRay.Direction * dragDistance)
+                end
+            end
+            RunService.RenderStepped:Wait()
+        end
+    end)
+end
+
+throwBtn.MouseButton1Click:Connect(function()
+    throwPart()
+end)
+
+detachBtn.MouseButton1Click:Connect(function()
+    stopDrag()
+end)
+
+local networkSection = mainTab:Section("网络所有权", false)
+
+local selectPlayerDropdown = nil
+
+local function getPlayerList()
+    local list = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        list[player.Name] = player.Name
+    end
+    return list
+end
+
+networkSection:Dropdown("选择玩家", "SelectPlayer", getPlayerList(), function(value)
+    selectedTargetPlayer = value
+end)
+
+addConnection(Players.PlayerAdded:Connect(function(player)
+    if selectPlayerDropdown then
+        selectPlayerDropdown:AddOption(player.Name)
+    end
+end))
+
+addConnection(Players.PlayerRemoving:Connect(function(player)
+    if selectPlayerDropdown then
+        selectPlayerDropdown:RemoveOption(player.Name)
+    end
+end))
+
+networkSection:Button("传送未锚固物体给他", function()
+    if not selectedTargetPlayer then
+        notification("XA：提示", "请先选择玩家", 5)
+        return
+    end
+    if not Players[selectedTargetPlayer] or not Players[selectedTargetPlayer].Character then
+        return
+    end
+    for _, part in pairs(unanchoredParts) do
+        if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) then
+            if canNetworkOwn(part) then
+                part.CFrame = Players[selectedTargetPlayer].Character:GetPivot()
+            end
+        end
+    end
+end)
+
+networkSection:Button("使用未锚固物体甩飞", function()
+    if not selectedTargetPlayer then
+        notification("XA：提示", "请先选择玩家", 5)
+        return
+    end
+    local targetChar = Players[selectedTargetPlayer].Character
+    if not targetChar then return end
+    
+    for _, part in pairs(unanchoredParts) do
+        if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) and canNetworkOwn(part) then
+            if not targetChar.Parent then
+                task.wait()
+                part.CFrame = targetChar:GetPivot()
+                part.Velocity = Vector3.new(0, 1000000, 0)
+                if not targetChar.Parent or targetChar.PrimaryPart.Velocity.Magnitude > 200 then
+                    break
+                end
+            end
+        end
+    end
+end)
+
+networkSection:Button("传送未锚固物体至自己", function()
+    for _, part in pairs(unanchoredParts) do
+        if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) then
+            part.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+        end
+    end
+end)
+
+networkSection:Toggle("拖动未锚固物体", "DragUnanchored", false, function(value)
+    if value then
+        dragPart.Parent = workspace
+    else
+        dragPart.Parent = nil
+        dragging = false
+        if stopDrag then stopDrag() end
+    end
+end)
+
+networkSection:Slider("扔的力度", "ThrowStrength", 350, 0, 500, false)
+networkSection:Toggle("物体旋转", "ObjectTorque", false)
+networkSection:Toggle("最大模拟半径", "MaxSimulation", false)
+
+local teleportSection = networkSection:Section("传送未锚固物体")
+
+local teleportPoint = nil
+
+teleportSection:Button("设置传送点", function()
+    pcall(function()
+        if workspace:FindFirstChild("BasedropCord") then
+            workspace.BasedropCord:Destroy()
+        end
+    end)
+    local point = Instance.new("Part")
+    point.Name = "BasedropCord"
+    point.Anchored = true
+    point.CanCollide = false
+    point.Parent = workspace
+    point.Shape = Enum.PartType.Ball
+    point.Size = Vector3.new(2, 2, 2)
+    point.Color = Color3.fromRGB(0, 217, 255)
+    point.Material = Enum.Material.ForceField
+    point.CFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+    teleportPoint = point.CFrame
+end)
+
+teleportSection:Button("删除传送点", function()
+    pcall(function()
+        if workspace:FindFirstChild("BasedropCord") then
+            workspace.BasedropCord:Destroy()
+        end
+    end)
+end)
+
+local selectedItems = {}
+local selectedCountLabel = teleportSection:Label("选择物品中个数：0")
+
+local function updateSelectedCount()
+    selectedCountLabel.Text = "选择物品中个数：" .. #selectedItems
+end
+
+teleportSection:Toggle("点击以选择物品", "SelectingItems", false)
+local itemNameLabel = teleportSection:Label("物品名称：nil")
+local itemHighlight = Instance.new("Highlight", CoreGui)
+itemHighlight.FillColor = Color3.new(0, 1, 0)
+itemHighlight.OutlineColor = Color3.new(0, 1, 0)
+
+teleportSection:Toggle("点击以查看物品名称", "ShowItemName", false)
+
+teleportSection:Textbox("输入想选择物品的名称", "Textbox", "", function(value)
+    local count = 0
+    for _, descendant in ipairs(workspace:GetDescendants()) do
+        if descendant:IsA("BasePart") and canNetworkOwn(descendant) then
+            table.insert(selectedItems, descendant)
+            count = count + 1
+        end
+    end
+    updateSelectedCount()
+    notification("XA：提示", "共找到" .. count .. "个物品", 5)
+end)
+
+teleportSection:Textbox("输入想选择物品的名称(match)", "Textbox", "", function(value)
+    local count = 0
+    for _, descendant in ipairs(workspace:GetDescendants()) do
+        if descendant:IsA("BasePart") and canNetworkOwn(descendant) and descendant.Name:match(value) then
+            table.insert(selectedItems, descendant)
+            count = count + 1
+        end
+    end
+    updateSelectedCount()
+    notification("XA：提示", "共找到" .. count .. "个物品", 5)
+end)
+
+teleportSection:Button("取消选择所有物品", function()
+    for _, item in pairs(selectedItems) do
+        pcall(function()
+            if item.Highlight then item.Highlight:Destroy() end
+        end)
+    end
+    selectedItems = {}
+    updateSelectedCount()
+end)
+
+teleportSection:Button("传送物品至所选地点", function()
+    if teleportPoint then
+        for _, item in pairs(selectedItems) do
+            item.CFrame = teleportPoint
+        end
+    end
+end)
+
+local objectOrbitSection = networkSection:Section("物体环绕", false)
+objectOrbitSection:Toggle("开关", "Blackhole", false)
+objectOrbitSection:Slider("半径", "RingRadius", 50, 0, 100, false)
+objectOrbitSection:Textbox("高度", "RingHeight", 100)
+objectOrbitSection:Textbox("旋转速度", "RotationSpeed", 10)
+objectOrbitSection:Textbox("吸引力强度", "AttractionStrength", 1000)
+
+addConnection(RunService.Heartbeat:Connect(function()
+    if flags.MaxSimulation then
+        LocalPlayer.SimulationRadius = math.huge
+    end
+    
+    if flags.Blackhole then
+        local center = LocalPlayer.Character.HumanoidRootPart.Position
+        for _, part in pairs(unanchoredParts) do
+            task.wait()
+            if part.Parent and not part:IsDescendantOf(LocalPlayer.Character) then
+                if canNetworkOwn(part) then
+                    part.Massless = true
+                    local partPos = part.Position
+                    local distance = (Vector3.new(partPos.X, center.Y, partPos.Z) - center).Magnitude
+                    local angle = math.atan2(partPos.Z - center.Z, partPos.X - center.X) + math.rad(flags.RotationSpeed)
+                    part.Velocity = (Vector3.new(
+                        center.X + math.cos(angle) * math.min(flags.RingRadius, distance),
+                        center.Y + flags.RingHeight * math.abs(math.sin((partPos.Y - center.Y) / flags.RingHeight)),
+                        center.Z + math.sin(angle) * math.min(flags.RingRadius, distance)
+                    ) - part.Position).unit * flags.AttractionStrength
+                end
+            end
+        end
+    end
+end))
+
+local npcControlSection = networkSection:Section("NPC控制", false)
+local npcHighlight = Instance.new("Highlight", CoreGui)
+npcHighlight.FillTransparency = 1
+local selectedNPCLabel = npcControlSection:Label("当前已选择NPC：无")
+
+npcControlSection:Toggle("点击以选择NPC", "ClickNPC", false)
+npcControlSection:Button("杀死NPC", function()
+    if selectedNPC and canNetworkOwn(selectedNPCPart) then
+        local humanoid = selectedNPC:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.Health = 0
+        end
+    end
+end)
+
+npcControlSection:Button("带来NPC", function()
+    if selectedNPC and canNetworkOwn(selectedNPCPart) then
+        selectedNPC:PivotTo(LocalPlayer.Character.HumanoidRootPart.CFrame)
+    end
+end)
+
+npcControlSection:Button("传送至NPC", function()
+    if selectedNPC then
+        LocalPlayer.Character:PivotTo(selectedNPC:GetPivot())
+    end
+end)
+
+local originalCharacter = nil
+
+npcControlSection:Toggle("控制NPC", "ControlNPC", false, function(value)
+    if value then
+        if selectedNPC and canNetworkOwn(selectedNPCPart) then
+            originalCharacter = LocalPlayer.Character
+            LocalPlayer.Character = selectedNPC
+            local humanoid = selectedNPC:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                Camera.CameraSubject = humanoid
+            end
+        end
+    else
+        if originalCharacter then
+            LocalPlayer.Character = originalCharacter
+            Camera.CameraSubject = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        end
+    end
+end)
+
+npcControlSection:Button("甩飞NPC", function()
+    if selectedNPC and selectedNPCPart and canNetworkOwn(selectedNPCPart) then
+        selectedNPCPart.Velocity = Vector3.new(9000000000, 9000000000, 9000000000)
+    end
+end)
+
+npcControlSection:Toggle("冻住NPC", "FreezeNPC", false, function(value)
+    if value then
+        if selectedNPC and canNetworkOwn(selectedNPCPart) then
+            local bodyPos = Instance.new("BodyPosition")
+            bodyPos.Name = "_BodyPosition"
+            bodyPos.Parent = selectedNPCPart
+            bodyPos.Position = selectedNPCPart.Position
+            bodyPos.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+            local bodyGyro = Instance.new("BodyGyro")
+            bodyGyro.Name = "_BodyGyro"
+            bodyGyro.Parent = selectedNPCPart
+            bodyGyro.CFrame = selectedNPCPart.CFrame
+            bodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+        end
+    else
+        if selectedNPC and selectedNPCPart then
+            for _, child in ipairs(selectedNPCPart:GetChildren()) do
+                if child.Name == "_BodyPosition" or child.Name == "_BodyGyro" then
+                    child:Destroy()
+                end
+            end
+        end
+    end
+end)
+
+npcControlSection:Button("让NPC跳", function()
+    if selectedNPC and canNetworkOwn(selectedNPCPart) then
+        local humanoid = selectedNPC:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid:ChangeState(3)
+        end
+    end
+end)
+
+npcControlSection:Toggle("NPC杀戮光环", "NPCKillAura", false, function(value)
+    while flags.NPCKillAura do
+        for model, _ in pairs(npcModels) do
+            local aimPart = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChildWhichIsA("BasePart")
+            if aimPart and canNetworkOwn(aimPart) then
+                if (LocalPlayer.Character.HumanoidRootPart.Position - aimPart.Position).Magnitude <= flags.NPCKillAuraRange then
+                    local humanoid = model:FindFirstChildOfClass("Humanoid")
+                    if humanoid then
+                        humanoid.Health = 0
+                    end
+                end
+            end
+        end
+        RunService.RenderStepped:Wait()
+    end
+end)
+
+npcControlSection:Slider("NPC杀戮光环范围", "NPCKillAuraRange", 15, 0, 50, false)
+
+Mouse.Button1Down:Connect(function()
+    if not Mouse.Target then return end
+    
+    local model = Mouse.Target:FindFirstAncestorOfClass("Model")
+    
+    if flags.ClickNPC then
+        if model then
+            if not Players:GetPlayerFromCharacter(model) then
+                local primaryPart = model.PrimaryPart or model:FindFirstChildWhichIsA("BasePart")
+                if primaryPart then
+                    selectedNPC = model
+                    selectedNPCPart = primaryPart
+                    selectedNPCLabel.Text = "当前已选择NPC：" .. model.Name
+                    npcHighlight.Adornee = model
+                    npcHighlight.OutlineColor = Color3.fromRGB(0, 255, 0)
+                else
+                    npcHighlight.Adornee = Mouse.Target:FindFirstAncestorOfClass("Model")
+                    npcHighlight.OutlineColor = Color3.fromRGB(255, 0, 0)
+                end
+            end
+        end
+    end
+    
+    local targetPart = Mouse.Target
+    if targetPart:IsA("BasePart") and canNetworkOwn(targetPart) then
+        if flags.DragUnanchored and not dragging then
+            startDrag(targetPart)
+        end
+        if flags.SelectingItems then
+            local index = table.find(selectedItems, targetPart)
+            if index then
+                table.remove(selectedItems, index)
+                updateSelectedCount()
+                pcall(function()
+                    if targetPart.Highlight then targetPart.Highlight:Destroy() end
+                end)
+            else
+                table.insert(selectedItems, targetPart)
+                updateSelectedCount()
+                Instance.new("Highlight", targetPart).FillTransparency = 1
+            end
+        end
+        if flags.ShowItemName then
+            itemHighlight.Adornee = targetPart
+            itemNameLabel.Text = "物品名称：" .. targetPart.Name
+        end
+    end
+end)
+
+local function createFloatUI()
+    local floatUI = Instance.new("Frame", screenGui)
+    floatUI.Visible = false
+    floatUI.Position = UDim2.new(0.5, 0, 0.5, 0)
+    
+    local clickPoint = Instance.new("ImageLabel")
+    clickPoint.Name = "ClickPoint_Temp"
+    clickPoint.Size = UDim2.new(0, 40, 0, 40)
+    clickPoint.Position = UDim2.new(0.5, 0, 0.5, 0)
+    clickPoint.BackgroundTransparency = 1
+    clickPoint.Draggable = true
+    clickPoint.Active = true
+    clickPoint.Image = "rbxassetid://110626268563466"
+    clickPoint.ZIndex = 100000
+    
+    local clickPointText = Instance.new("TextLabel", clickPoint)
+    clickPointText.Position = UDim2.new(0.5, 0, 0.5, 0)
+    clickPointText.AnchorPoint = Vector2.new(0.5, 0.5)
+    clickPointText.Size = UDim2.new(0.7, 0, 0.7, 0)
+    clickPointText.TextSize = 14
+    clickPointText.Text = "1"
+    clickPointText.TextColor3 = Color3.new(0, 0, 0)
+    clickPointText.BackgroundTransparency = 1
+    clickPointText.ZIndex = 100001
+    
+    local controlPanel = Instance.new("Frame", screenGui)
+    controlPanel.BorderSizePixel = 0
+    controlPanel.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    controlPanel.Size = UDim2.new(0, 30, 0, 192)
+    controlPanel.Position = UDim2.new(0, 16, 0, 34)
+    controlPanel.BackgroundTransparency = 0.5
+    controlPanel.Draggable = true
+    controlPanel.Active = true
+    controlPanel.Visible = false
+    
+    local uiList = Instance.new("UIListLayout", controlPanel)
+    
+    local icons = {
+        Start = "rbxassetid://128832474920642",
+        Stop = "rbxassetid://113047868752296",
+        AddButton = "rbxassetid://80871366492449",
+        DeleteButton = "rbxassetid://122610572797061",
+        EyesOn = "rbxassetid://82900330630483",
+        EyesOff = "rbxassetid://89558029527587",
+        ClickPoint = "rbxassetid://110626268563466",
+        ClickPointClicking = "rbxassetid://104432635380836"
+    }
+    
+    local function createIconButton(parent, image)
+        local btn = Instance.new("ImageButton")
+        btn.BorderSizePixel = 0
+        btn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        btn.Size = UDim2.new(0, 30, 0, 30)
+        btn.BackgroundTransparency = 1
+        btn.Image = image
+        btn.Parent = parent
+        return btn
+    end
+    
+    local autoClicking = false
+    local clickDelay = 0
+    local clickPointCount = 1
+    
+    local startStopBtn = createIconButton(controlPanel, icons.Start)
+    startStopBtn.MouseButton1Click:Connect(function()
+        autoClicking = not autoClicking
+        controlPanel.BackgroundColor3 = autoClicking and Color3.fromRGB(0, 255, 125) or Color3.fromRGB(255, 255, 255)
+        
+        if autoClicking then
+            for _, child in ipairs(floatUI:GetChildren()) do
+                if child:IsA("ImageLabel") then
+                    child.Active = false
+                    child.Image = icons.ClickPointClicking
+                end
+            end
+            startStopBtn.Image = icons.Stop
+        else
+            for _, child in ipairs(floatUI:GetChildren()) do
+                if child:IsA("ImageLabel") then
+                    child.Active = true
+                    child.Image = icons.ClickPoint
+                end
+            end
+            startStopBtn.Image = icons.Start
+            
+            while autoClicking do
+                for _, child in ipairs(floatUI:GetChildren()) do
+                    if child:IsA("ImageLabel") then
+                        local size = child.AbsoluteSize
+                        local pos = child.AbsolutePosition
+                        local x = pos.X + size.X / 2 + screenOffsetX
+                        local y = pos.Y + size.Y / 2 + screenOffsetY
+                        
+                        if isMobile then
+                            local touchId = math.random(999)
+                            VirtualInputManager:SendTouchEvent(touchId, 0, x, y)
+                            task.wait()
+                            VirtualInputManager:SendTouchEvent(touchId, 2, x, y)
+                        else
+                            VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                            task.wait()
+                            VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+                        end
+                    end
+                end
+                task.wait(clickDelay)
+            end
+        end
+    end)
+    
+    local addBtn = createIconButton(controlPanel, icons.AddButton)
+    addBtn.MouseButton1Click:Connect(function()
+        local newPoint = clickPoint:Clone()
+        newPoint.Parent = floatUI
+        newPoint.TextLabel.Text = clickPointCount
+        clickPointCount = clickPointCount + 1
+    end)
+    
+    local deleteBtn = createIconButton(controlPanel, icons.DeleteButton)
+    deleteBtn.MouseButton1Click:Connect(function()
+        local children = floatUI:GetChildren()
+        if #children == 0 then return end
+        children[#children]:Destroy()
+        if clickPointCount > 1 then
+            clickPointCount = clickPointCount - 1
+        end
+    end)
+    
+    local eyesBtn = createIconButton(controlPanel, icons.EyesOn)
+    local eyesVisible = true
+    eyesBtn.MouseButton1Click:Connect(function()
+        eyesVisible = not eyesVisible
+        eyesBtn.Image = eyesVisible and icons.EyesOn or icons.EyesOff
+        for _, child in ipairs(floatUI:GetChildren()) do
+            if child:IsA("ImageLabel") then
+                child.Visible = eyesVisible
+            end
+        end
+    end)
+    
+    local clickerSection = mainTab:Section("连点器", false)
+    clickerSection:Toggle("显示UI", "Toggle", false, function(value)
+        floatUI.Visible = value
+        controlPanel.Visible = value
+    end)
+    clickerSection:Textbox("点击延迟(输入数字)", "Textbox", "", function(value)
+        if tonumber(value) then
+            clickDelay = tonumber(value)
+        end
+    end)
+end
+
+local function createMusicPlayer()
+    local musicUI = {}
+    musicUI.ScreenGui = screenGui
+    musicUI.MainFrame = Instance.new("Frame", musicUI.ScreenGui)
+    musicUI.MainFrame.Active = true
+    musicUI.MainFrame.BorderSizePixel = 0
+    musicUI.MainFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.MainFrame.Size = UDim2.new(0, 500, 0, 300)
+    musicUI.MainFrame.Position = UDim2.new(0, 172, 0, 7)
+    musicUI.MainFrame.Name = "MainFrame"
+    musicUI.MainFrame.Visible = false
+    
+    local dragDetector = Instance.new("UIDragDetector", musicUI.MainFrame)
+    
+    musicUI.BottomFrame = Instance.new("Frame", musicUI.MainFrame)
+    musicUI.BottomFrame.Active = true
+    musicUI.BottomFrame.BorderSizePixel = 0
+    musicUI.BottomFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.BottomFrame.AnchorPoint = Vector2.new(0, 1)
+    musicUI.BottomFrame.Size = UDim2.new(1, 0, 0, 62)
+    musicUI.BottomFrame.Position = UDim2.new(0, 0, 1, 0)
+    musicUI.BottomFrame.Name = "BottomFrame"
+    
+    musicUI.CurrentSongName = Instance.new("TextLabel", musicUI.BottomFrame)
+    musicUI.CurrentSongName.BorderSizePixel = 0
+    musicUI.CurrentSongName.TextSize = 13
+    musicUI.CurrentSongName.TextXAlignment = Enum.TextXAlignment.Left
+    musicUI.CurrentSongName.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.CurrentSongName.Size = UDim2.new(0, 86, 0, 18)
+    musicUI.CurrentSongName.Text = "歌曲名称"
+    musicUI.CurrentSongName.Name = "Current_SongName"
+    musicUI.CurrentSongName.Position = UDim2.new(0, 10, 0, 7)
+    
+    musicUI.CurrentSinger = Instance.new("TextLabel", musicUI.BottomFrame)
+    musicUI.CurrentSinger.BorderSizePixel = 0
+    musicUI.CurrentSinger.TextSize = 10
+    musicUI.CurrentSinger.TextXAlignment = Enum.TextXAlignment.Left
+    musicUI.CurrentSinger.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.CurrentSinger.Size = UDim2.new(0, 78, 0, 14)
+    musicUI.CurrentSinger.Text = "歌手"
+    musicUI.CurrentSinger.Name = "Current_Singer"
+    musicUI.CurrentSinger.Position = UDim2.new(0, 10, 0, 27)
+    
+    musicUI.CurrentTime = Instance.new("TextLabel", musicUI.BottomFrame)
+    musicUI.CurrentTime.BorderSizePixel = 0
+    musicUI.CurrentTime.TextSize = 10
+    musicUI.CurrentTime.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.CurrentTime.Size = UDim2.new(0.2, 0, 0.3, 0)
+    musicUI.CurrentTime.Text = "00:00/00:00"
+    musicUI.CurrentTime.Name = "Current_Time"
+    musicUI.CurrentTime.Position = UDim2.new(0, 390, 0, 10)
+    
+    musicUI.Progress = Instance.new("Frame", musicUI.BottomFrame)
+    musicUI.Progress.Active = true
+    musicUI.Progress.BorderSizePixel = 0
+    musicUI.Progress.BackgroundColor3 = Color3.fromRGB(192, 192, 192)
+    musicUI.Progress.Size = UDim2.new(1, 0, 0, 4)
+    musicUI.Progress.Name = "Progress"
+    
+    musicUI.Fill = Instance.new("Frame", musicUI.Progress)
+    musicUI.Fill.BorderSizePixel = 0
+    musicUI.Fill.BackgroundColor3 = Color3.fromRGB(252, 47, 47)
+    musicUI.Fill.Size = UDim2.new(0, 0, 1, 0)
+    musicUI.Fill.Name = "Fill"
+    
+    musicUI.Circle = Instance.new("Frame", musicUI.Fill)
+    musicUI.Circle.ZIndex = 2
+    musicUI.Circle.BorderSizePixel = 0
+    musicUI.Circle.BackgroundColor3 = Color3.fromRGB(252, 47, 47)
+    musicUI.Circle.AnchorPoint = Vector2.new(1, 0.5)
+    musicUI.Circle.Size = UDim2.new(0, 10, 0, 10)
+    musicUI.Circle.Position = UDim2.new(1, 0, 0.5, 0)
+    musicUI.Circle.Name = "Circle"
+    
+    local circleCorner = Instance.new("UICorner", musicUI.Circle)
+    circleCorner.CornerRadius = UDim.new(0, 10)
+    
+    local fillPadding = Instance.new("UIPadding", musicUI.Fill)
+    fillPadding.PaddingLeft = UDim.new(0, 5)
+    
+    musicUI.Play = Instance.new("ImageButton", musicUI.BottomFrame)
+    musicUI.Play.BorderSizePixel = 0
+    musicUI.Play.BackgroundTransparency = 1
+    musicUI.Play.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Play.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    musicUI.Play.AnchorPoint = Vector2.new(0.5, 0.5)
+    musicUI.Play.Image = "rbxassetid://129543182573744"
+    musicUI.Play.Size = UDim2.new(0, 40, 0, 40)
+    musicUI.Play.Name = "Play"
+    musicUI.Play.Position = UDim2.new(0.5, 0, 0.5, 5)
+    
+    musicUI.Previous = Instance.new("ImageButton", musicUI.BottomFrame)
+    musicUI.Previous.BorderSizePixel = 0
+    musicUI.Previous.BackgroundTransparency = 1
+    musicUI.Previous.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Previous.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    musicUI.Previous.AnchorPoint = Vector2.new(0.5, 0.5)
+    musicUI.Previous.Image = "rbxassetid://114138954917019"
+    musicUI.Previous.Size = UDim2.new(0, 25, 0, 25)
+    musicUI.Previous.Name = "Previous"
+    musicUI.Previous.Position = UDim2.new(0.5, -50, 0.5, 5)
+    
+    musicUI.Next = Instance.new("ImageButton", musicUI.BottomFrame)
+    musicUI.Next.BorderSizePixel = 0
+    musicUI.Next.BackgroundTransparency = 1
+    musicUI.Next.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Next.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    musicUI.Next.AnchorPoint = Vector2.new(0.5, 0.5)
+    musicUI.Next.Image = "rbxassetid://128554058391470"
+    musicUI.Next.Size = UDim2.new(0, 25, 0, 25)
+    musicUI.Next.Name = "Next"
+    musicUI.Next.Position = UDim2.new(0.5, 50, 0.5, 5)
+    
+    musicUI.Like = Instance.new("ImageButton", musicUI.BottomFrame)
+    musicUI.Like.BorderSizePixel = 0
+    musicUI.Like.BackgroundTransparency = 1
+    musicUI.Like.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Like.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    musicUI.Like.AnchorPoint = Vector2.new(0.5, 0.5)
+    musicUI.Like.Image = "rbxassetid://122940095996865"
+    musicUI.Like.Size = UDim2.new(0, 25, 0, 25)
+    musicUI.Like.Name = "Like"
+    musicUI.Like.Position = UDim2.new(0.5, -100, 0.5, 5)
+    
+    musicUI.Loop = Instance.new("ImageButton", musicUI.BottomFrame)
+    musicUI.Loop.BorderSizePixel = 0
+    musicUI.Loop.BackgroundTransparency = 1
+    musicUI.Loop.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Loop.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    musicUI.Loop.AnchorPoint = Vector2.new(0.5, 0.5)
+    musicUI.Loop.Image = "rbxassetid://116146140475722"
+    musicUI.Loop.Size = UDim2.new(0, 25, 0, 25)
+    musicUI.Loop.Name = "Loop"
+    musicUI.Loop.Position = UDim2.new(0.5, 100, 0.5, 5)
+    
+    local bottomCorner = Instance.new("UICorner", musicUI.BottomFrame)
+    local bottomPadding = Instance.new("UIPadding", musicUI.BottomFrame)
+    bottomPadding.PaddingBottom = UDim.new(0, 10)
+    
+    musicUI.ToggleLyric = Instance.new("TextButton", musicUI.BottomFrame)
+    musicUI.ToggleLyric.TextWrapped = true
+    musicUI.ToggleLyric.BorderSizePixel = 0
+    musicUI.ToggleLyric.TextScaled = true
+    musicUI.ToggleLyric.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.ToggleLyric.BackgroundTransparency = 1
+    musicUI.ToggleLyric.Size = UDim2.new(0, 30, 0, 30)
+    musicUI.ToggleLyric.Text = "∧"
+    musicUI.ToggleLyric.Name = "ToggleLyric"
+    musicUI.ToggleLyric.Position = UDim2.new(0, 450, 0, 27)
+    
+    local mainCorner = Instance.new("UICorner", musicUI.MainFrame)
+    
+    musicUI.Title = Instance.new("TextLabel", musicUI.MainFrame)
+    musicUI.Title.BorderSizePixel = 0
+    musicUI.Title.TextSize = 15
+    musicUI.Title.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Title.BackgroundTransparency = 1
+    musicUI.Title.Size = UDim2.new(0, 96, 0, 24)
+    musicUI.Title.Text = "网易云音乐"
+    musicUI.Title.Name = "Title"
+    musicUI.Title.Position = UDim2.new(0, 6, 0, 5)
+    
+    musicUI.CloseButton = Instance.new("ImageButton", musicUI.MainFrame)
+    musicUI.CloseButton.BorderSizePixel = 0
+    musicUI.CloseButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.CloseButton.ImageColor3 = Color3.fromRGB(0, 0, 0)
+    musicUI.CloseButton.Image = "rbxassetid://137161637202736"
+    musicUI.CloseButton.Size = UDim2.new(0, 18, 0, 18)
+    musicUI.CloseButton.Name = "CloseButton"
+    musicUI.CloseButton.Position = UDim2.new(0.95, 0, 0, 10)
+    
+    musicUI.Search = Instance.new("TextBox", musicUI.MainFrame)
+    musicUI.Search.CursorPosition = -1
+    musicUI.Search.Name = "Search"
+    musicUI.Search.BorderSizePixel = 0
+    musicUI.Search.TextColor3 = Color3.fromRGB(0, 0, 0)
+    musicUI.Search.BackgroundColor3 = Color3.fromRGB(242, 242, 242)
+    musicUI.Search.PlaceholderText = "搜索..."
+    musicUI.Search.Size = UDim2.new(0, 100, 0, 18)
+    musicUI.Search.Position = UDim2.new(0.7, 0, 0, 10)
+    musicUI.Search.Text = ""
+    
+    local searchCorner = Instance.new("UICorner", musicUI.Search)
+    
+    local searchIcon = Instance.new("ImageLabel", musicUI.Search)
+    searchIcon.BorderSizePixel = 0
+    searchIcon.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    searchIcon.Image = "rbxassetid://88867690872223"
+    searchIcon.Size = UDim2.new(0, 18, 0, 18)
+    searchIcon.BackgroundTransparency = 1
+    
+    musicUI.Pages = Instance.new("Frame", musicUI.MainFrame)
+    musicUI.Pages.BorderSizePixel = 0
+    musicUI.Pages.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Pages.AnchorPoint = Vector2.new(0, 1)
+    musicUI.Pages.Size = UDim2.new(1, 0, 0.67, 0)
+    musicUI.Pages.Position = UDim2.new(0, 0, 1, -62)
+    musicUI.Pages.Name = "Pages"
+    
+    musicUI.LeftFrame = Instance.new("ScrollingFrame", musicUI.Pages)
+    musicUI.LeftFrame.BorderSizePixel = 0
+    musicUI.LeftFrame.Name = "LeftFrame"
+    musicUI.LeftFrame.BackgroundColor3 = Color3.fromRGB(242, 242, 242)
+    musicUI.LeftFrame.AnchorPoint = Vector2.new(0, 1)
+    musicUI.LeftFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    musicUI.LeftFrame.Size = UDim2.new(0, 98, 1, 0)
+    musicUI.LeftFrame.ScrollBarImageColor3 = Color3.fromRGB(103, 103, 103)
+    musicUI.LeftFrame.Position = UDim2.new(0, 0, 1, 0)
+    musicUI.LeftFrame.ScrollBarThickness = 1
+    
+    local leftListLayout = Instance.new("UIListLayout", musicUI.LeftFrame)
+    leftListLayout.Padding = UDim.new(0.005, 0)
+    
+    local exampleTab = Instance.new("TextButton", musicUI.LeftFrame)
+    exampleTab.TextWrapped = true
+    exampleTab.BorderSizePixel = 0
+    exampleTab.TextSize = 12
+    exampleTab.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    exampleTab.Size = UDim2.new(1, 0, 0, 30)
+    exampleTab.Text = "ExampleTab"
+    exampleTab.Name = "ExampleTab"
+    exampleTab.Visible = false
+    
+    local exampleFrame = Instance.new("ScrollingFrame", musicUI.Pages)
+    exampleFrame.Visible = false
+    exampleFrame.BorderSizePixel = 0
+    exampleFrame.CanvasPosition = Vector2.new(3, 0)
+    exampleFrame.Name = "ExampleFrame"
+    exampleFrame.BackgroundColor3 = Color3.fromRGB(242, 242, 242)
+    exampleFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    exampleFrame.Size = UDim2.new(1, -98, 1, 0)
+    exampleFrame.ScrollBarImageColor3 = Color3.fromRGB(104, 104, 104)
+    exampleFrame.Position = UDim2.new(0, 98, 0, 0)
+    exampleFrame.ScrollBarThickness = 3
+    
+    local exampleListLayout = Instance.new("UIListLayout", exampleFrame)
+    exampleListLayout.Padding = UDim.new(0.005, 0)
+    
+    local tempButton = Instance.new("TextButton", exampleFrame)
+    tempButton.BorderSizePixel = 0
+    tempButton.TextSize = 10
+    tempButton.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    tempButton.Size = UDim2.new(1, 0, 0, 30)
+    tempButton.Text = ""
+    tempButton.Name = "TempButton"
+    tempButton.Visible = false
+    
+    local tempNumber = Instance.new("TextLabel", tempButton)
+    tempNumber.BorderSizePixel = 0
+    tempNumber.TextXAlignment = Enum.TextXAlignment.Left
+    tempNumber.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    tempNumber.BackgroundTransparency = 1
+    tempNumber.Size = UDim2.new(0, 10, 1, 0)
+    tempNumber.Name = "Number"
+    tempNumber.Position = UDim2.new(0, 10, 0, 0)
+    
+    local tempSongName = Instance.new("TextLabel", tempButton)
+    tempSongName.BorderSizePixel = 0
+    tempSongName.TextSize = 10
+    tempSongName.TextXAlignment = Enum.TextXAlignment.Left
+    tempSongName.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    tempSongName.BackgroundTransparency = 1
+    tempSongName.Size = UDim2.new(0, 10, 1, 0)
+    tempSongName.Name = "SongName"
+    tempSongName.Position = UDim2.new(0, 30, 0, 0)
+    
+    local tempSinger = Instance.new("TextLabel", tempButton)
+    tempSinger.BorderSizePixel = 0
+    tempSinger.TextSize = 10
+    tempSinger.TextXAlignment = Enum.TextXAlignment.Left
+    tempSinger.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    tempSinger.BackgroundTransparency = 1
+    tempSinger.Size = UDim2.new(0, 10, 1, 0)
+    tempSinger.Name = "Singer"
+    tempSinger.Position = UDim2.new(0.55, 0, 0, 0)
+    
+    local tempDuration = Instance.new("TextLabel", tempButton)
+    tempDuration.BorderSizePixel = 0
+    tempDuration.TextSize = 10
+    tempDuration.TextXAlignment = Enum.TextXAlignment.Left
+    tempDuration.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    tempDuration.BackgroundTransparency = 1
+    tempDuration.Size = UDim2.new(0, 10, 1, 0)
+    tempDuration.Position = UDim2.new(0.8, 0, 0, 0)
+    
+    local topDivider = Instance.new("Frame", musicUI.Pages)
+    topDivider.ZIndex = 2
+    topDivider.BorderSizePixel = 0
+    topDivider.BackgroundColor3 = Color3.fromRGB(204, 204, 204)
+    topDivider.AnchorPoint = Vector2.new(0.5, 0)
+    topDivider.Size = UDim2.new(0.975, 0, 0, 1)
+    topDivider.Position = UDim2.new(0.5, 0, 0, 0)
+    topDivider.Name = "Divider_Top"
+    
+    local sideDivider = Instance.new("Frame", musicUI.Pages)
+    sideDivider.ZIndex = 2
+    sideDivider.BorderSizePixel = 0
+    sideDivider.BackgroundColor3 = Color3.fromRGB(184, 184, 184)
+    sideDivider.AnchorPoint = Vector2.new(0, 0.5)
+    sideDivider.Size = UDim2.new(0, 2, 0.975, 0)
+    sideDivider.Position = UDim2.new(0, 98, 0.5, 0)
+    sideDivider.Name = "Divider"
+    
+    musicUI.Contents = Instance.new("Frame", musicUI.MainFrame)
+    musicUI.Contents.BorderSizePixel = 0
+    musicUI.Contents.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    musicUI.Contents.AnchorPoint = Vector2.new(0, 1)
+    musicUI.Contents.Size = UDim2.new(1, 0, 0.67, 0)
+    musicUI.Contents.Position = UDim2.new(0, 0, 1, -62)
+    musicUI.Contents.Name = "Contents"
+    musicUI.Contents.Visible = false
+    
+    musicUI.SongList = Instance.new("ScrollingFrame", musicUI.Contents)
+    musicUI.SongList.BorderSizePixel = 0
+    musicUI.SongList.CanvasPosition = Vector2.new(1, 0)
+    musicUI.SongList.Name = "SongList"
+    musicUI.SongList.BackgroundColor3 = Color3.fromRGB(242, 242, 242)
+    musicUI.SongList.AnchorPoint = Vector2.new(0, 1)
+    musicUI.SongList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    musicUI.SongList.Size = UDim2.new(0.25, 0, 1, 0)
+    musicUI.SongList.ScrollBarImageColor3 = Color3.fromRGB(103, 103, 103)
+    musicUI.SongList.Position = UDim2.new(0, 0, 1, 0)
+    musicUI.SongList.ScrollBarThickness = 1
+    
+    local songListLayout = Instance.new("UIListLayout", musicUI.SongList)
+    songListLayout.Padding = UDim.new(0.005, 0)
+    
+    local exampleSong = Instance.new("TextButton", musicUI.SongList)
+    exampleSong.BorderSizePixel = 0
+    exampleSong.TextSize = 12
+    exampleSong.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    exampleSong.Size = UDim2.new(1, 0, 0, 30)
+    exampleSong.Text = ""
+    exampleSong.Name = "ExampleSong"
+    exampleSong.Visible = false
+    
+    local songNameLabel = Instance.new("TextLabel", exampleSong)
+    songNameLabel.BorderSizePixel = 0
+    songNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+    songNameLabel.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    songNameLabel.Size = UDim2.new(0, 3, 1, 0)
+    songNameLabel.Text = "SongName"
+    songNameLabel.Name = "SongName"
+    songNameLabel.Position = UDim2.new(0, 5, 0, 0)
+    
+    local songTimeLabel = Instance.new("TextLabel", exampleSong)
+    songTimeLabel.BorderSizePixel = 0
+    songTimeLabel.TextXAlignment = Enum.TextXAlignment.Right
+    songTimeLabel.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    songTimeLabel.AnchorPoint = Vector2.new(1, 0)
+    songTimeLabel.Size = UDim2.new(0, 3, 1, 0)
+    songTimeLabel.Text = "00:00"
+    songTimeLabel.Name = "SongTime"
+    songTimeLabel.Position = UDim2.new(1, -3, 0, 0)
+    
+    musicUI.Lyrics = Instance.new("ScrollingFrame", musicUI.Contents)
+    musicUI.Lyrics.BorderSizePixel = 0
+    musicUI.Lyrics.CanvasPosition = Vector2.new(1.63928, 0)
+    musicUI.Lyrics.Name = "Lyrics"
+    musicUI.Lyrics.BackgroundColor3 = Color3.fromRGB(242, 242, 242)
+    musicUI.Lyrics.AnchorPoint = Vector2.new(1, 0)
+    musicUI.Lyrics.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    musicUI.Lyrics.Size = UDim2.new(0.75, 0, 1, 0)
+    musicUI.Lyrics.ScrollBarImageColor3 = Color3.fromRGB(104, 104, 104)
+    musicUI.Lyrics.Position = UDim2.new(1, 0, 0, 0)
+    musicUI.Lyrics.ScrollBarThickness = 3
+    
+    local lyricsLayout = Instance.new("UIListLayout", musicUI.Lyrics)
+    lyricsLayout.Padding = UDim.new(0.005, 0)
+    lyricsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    
+    local exampleLyric = Instance.new("TextButton", musicUI.Lyrics)
+    exampleLyric.TextWrapped = true
+    exampleLyric.BorderSizePixel = 0
+    exampleLyric.TextScaled = true
+    exampleLyric.TextColor3 = Color3.fromRGB(150, 150, 150)
+    exampleLyric.BackgroundTransparency = 1
+    exampleLyric.Size = UDim2.new(1, 0, 0, 20)
+    exampleLyric.Name = "ExampleLyric"
+    exampleLyric.Visible = false
+    exampleLyric.Active = false
+    
+    local lyricsPadding = Instance.new("UIPadding", musicUI.Lyrics)
+    lyricsPadding.PaddingTop = UDim.new(0, 2)
+    
+    local contentsTopDivider = Instance.new("Frame", musicUI.Contents)
+    contentsTopDivider.ZIndex = 2
+    contentsTopDivider.BorderSizePixel = 0
+    contentsTopDivider.BackgroundColor3 = Color3.fromRGB(204, 204, 204)
+    contentsTopDivider.AnchorPoint = Vector2.new(0.5, 0)
+    contentsTopDivider.Size = UDim2.new(0.975, 0, 0, 1)
+    contentsTopDivider.Position = UDim2.new(0.5, 0, 0, 0)
+    contentsTopDivider.Name = "Divider_Top"
+    
+    local contentsSideDivider = Instance.new("Frame", musicUI.Contents)
+    contentsSideDivider.ZIndex = 2
+    contentsSideDivider.BorderSizePixel = 0
+    contentsSideDivider.BackgroundColor3 = Color3.fromRGB(184, 184, 184)
+    contentsSideDivider.AnchorPoint = Vector2.new(0, 0.5)
+    contentsSideDivider.Size = UDim2.new(0, 2, 0.975, 0)
+    contentsSideDivider.Position = UDim2.new(0.25, 0, 0.5, 0)
+    contentsSideDivider.Name = "Divider"
+    
+    if isMobile then
+        local mobileToggle = Instance.new("TextButton", screenGui)
+        mobileToggle.Name = "ToggleMusicMobile"
+        mobileToggle.TextScaled = true
+        mobileToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+        mobileToggle.AnchorPoint = Vector2.new(0, 1)
+        mobileToggle.BackgroundTransparency = 1
+        mobileToggle.Size = UDim2.new(0.08079, 0, 0.09357, 0)
+        mobileToggle.Text = "音乐"
+        mobileToggle.Position = UDim2.new(0, 0, 1, 0)
+        mobileToggle.Visible = false
+        mobileToggle.Draggable = true
+        Instance.new("UIStroke", mobileToggle)
+        
+        mobileToggle.MouseButton1Click:Connect(function()
+            musicUI.MainFrame.Visible = not musicUI.MainFrame.Visible
+            mobileToggle.TextColor3 = musicUI.MainFrame.Visible and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 255, 255)
+        end)
+    end
+    
+    musicUI.CloseButton.MouseButton1Click:Connect(function()
+        musicUI.MainFrame:Destroy()
+    end)
+end
+
+local function createAudioVisualizer()
+    local visualizer = Instance.new("Frame", screenGui)
+    visualizer.Name = "_V"
+    visualizer.Visible = false
+    visualizer.Position = UDim2.new(0.5, 0, 0.5, 0)
+    
+    local function createCircle()
+        local circle = Instance.new("Frame", visualizer)
+        circle.BackgroundColor3 = Color3.fromRGB(0, 217, 255)
+        circle.Size = UDim2.new(0, 15, 0, 15)
+        circle.Position = UDim2.new(0.5, 0, 0.5, 0)
+        circle.AnchorPoint = Vector2.new(0.5, 0.5)
+        circle.BorderSizePixel = 0
+        circle.BackgroundTransparency = 0.5
+        
+        local corner = Instance.new("UICorner", circle)
+        corner.CornerRadius = UDim.new(0, 10)
+        
+        local stroke = Instance.new("UIStroke", circle)
+        stroke.Thickness = 1.5
+        stroke.Color = Color3.fromRGB(255, 255, 255)
+        
+        return circle
+    end
+    
+    visualizer.Circle = createCircle()
+    visualizer.Visible = false
+end
+
+local scriptsTab = menu:Tab("脚本库", "6035145364")
+
+local function loadGameScripts()
+    local gameList = {}
+    local gameOptions = {}
+    
+    local scriptsSection = scriptsTab:Section("游戏脚本", false)
+    local gameDropdown = scriptsSection:Dropdown("选择游戏", "SelectGame", gameOptions, function(value)
+        selectedGameScript = value .. ".lua"
+    end)
+    
+    scriptsSection:Button("加载脚本", function()
+        if not selectedGameScript then
+            notification("XA：提示", "请先选择游戏", 5)
+            return
+        end
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Games/" .. selectedGameScript))()
+    end)
+    
+    scriptsSection:Button("复制脚本链接", function()
+        if not selectedGameScript then
+            notification("XA：提示", "请先选择游戏", 5)
+            return
+        end
+        setclipboard("loadstring(game:HttpGet(\"https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Games/" .. selectedGameScript .. "\"))()")
+    end)
+    
+    scriptsSection:Button("加载脚本加载器", function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/GameLoad.lua"))()
+    end)
+    
+    scriptsSection:Button("复制脚本加载器链接", function()
+        setclipboard("loadstring(game:HttpGet(\"https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/GameLoad.lua\"))()")
+    end)
+    
+    local adminSection = scriptsTab:Section("管理脚本", false)
+    adminSection:Button("Infinite Yield", function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"))()
+    end)
+    adminSection:Button("Nameless Admin", function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/FilteringEnabled/NamelessAdmin/main/Source"))()
+    end)
+    adminSection:Button("CMD-X", function()
+        loadstring(game:HttpGet("https://glot.io/snippets/gzrux646yj/raw/main.ts"))()
+    end)
+    adminSection:Button("CMD-X (备用)", function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/CMD-X/CMD-X/master/Source", true))()
+    end)
+    adminSection:Button("Vape V4", function()
+        loadstring(game:GetObjects("rbxassetid://8127297852")[1].Source)()
+    end)
+    adminSection:Button("Cool GUI", function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/theawesomari0/c00lgui/main/c00lgui", true))()
+    end)
+    adminSection:Button("Crescent", function()
+        loadstring(game:HttpGet("https://pastebin.com/raw/JipYNCht", true))()
+    end)
+    adminSection:Button("控制器", function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/Controller.lua"))()
+    end)
+    
+    adminSection:Textbox("换肤", "Textbox", "", function(value)
+        LocalPlayer:ClearCharacterAppearance()
+        local description = Players:GetHumanoidDescriptionFromUserId(Players:GetUserIdFromNameAsync(value))
+        LocalPlayer.Character.Humanoid:ApplyDescriptionClientServer(description)
+    end)
+end
+
+local function createBackdoorDetector()
+    local detectedRemotes = {}
+    local backdoorRemotes = {}
+    
+    local detectorSection = scriptsTab:Section("后门检测", false)
+    detectorSection:Button("扫描后门", function()
+        for _, obj in ipairs(game:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local testName = 'Instance.new("Model", workspace).Name = "_Detector' .. #detectedRemotes + 1 .. '"'
+                detectedRemotes[#detectedRemotes + 1] = obj
+                
+                if obj:IsA("RemoteEvent") then
+                    obj:FireServer(testName)
+                elseif obj:IsA("RemoteFunction") then
+                    spawn(function()
+                        obj:InvokeServer(testName)
+                    end)
+                end
+            end
+        end
+        
+        task.wait(1)
+        
+        for i, remote in pairs(detectedRemotes) do
+            if workspace:FindFirstChild("_Detector" .. i) then
+                notification("XA：提示", "已找到后门！", 5)
+                backdoorRemotes[#backdoorRemotes + 1] = remote
+            end
+        end
+    end)
+end
+
+local function createDeveloperProductsUI()
+    local devSection = scriptsTab:Section("开发者产品", false)
+    
+    task.spawn(function()
+        local products = MarketplaceService:GetDeveloperProductsAsync()
+        for _, product in products:GetCurrentPage() do
+            devSection:Button("名称: " .. product.displayName .. " 价格: " .. product.PriceInRobux .. " Id: " .. product.ProductId, function()
+                MarketplaceService:SignalPromptProductPurchaseFinished(LocalPlayer.UserId, product.ProductId, true)
+            end)
+        end
+    end)
+    
+    devSection:Button("绕过通行证验证", function()
+        local oldMethod = hookmetamethod(game, "__namecall", function(self, ...)
+            local name = tostring(self)
+            if name == "MarketplaceService" and name:lower() == "userownsgamepassasync" then
+                return true
+            end
+            return oldMethod(self, ...)
+        end)
+        hookfunction(MarketplaceService.UserOwnsGamePassAsync, function(...)
+            return true
+        end)
+    end)
+end
+
+local function createReachSettings()
+    local reachConfig = {
+        Targets = {Players = true, NPCs = false},
+        TeamCheck = false,
+        Range = 10,
+        Reach = false
+    }
+    
+    local reachSection = scriptsTab:Section("范围攻击", false)
+    
+    local overlapParams = OverlapParams.new()
+    overlapParams.FilterType = Enum.RaycastFilterType.Blacklist
+    
+    reachSection:Toggle("范围攻击开关", function(value)
+        reachConfig.Reach = value
+        while reachConfig.Reach do
+            task.wait()
+            local tool = LocalPlayer.Character:FindFirstChildWhichIsA("Tool")
+            local touchTransmitter = tool and tool:FindFirstChildWhichIsA("TouchTransmitter", true)
+            if touchTransmitter then
+                local targets = getTargets(reachConfig.Targets.Players, reachConfig.Targets.NPCs, reachConfig.TeamCheck)
+                overlapParams.FilterDescendantsInstances = targets
+                local parts = workspace:GetPartBoundsInBox(touchTransmitter.Parent.CFrame, touchTransmitter.Parent.Size + Vector3.new(reachConfig.Range, reachConfig.Range, reachConfig.Range), overlapParams)
+                for _, part in pairs(parts) do
+                    tool:Activate()
+                    firetouchinterest(touchTransmitter.Parent, part, 1)
+                    firetouchinterest(touchTransmitter.Parent, part, 0)
+                end
+            end
+        end
+    end, false)
+    
+    reachSection:Slider("范围", 10, 0, 30, true, function(value)
+        reachConfig.Range = value
+    end)
+    
+    reachSection:Toggle("攻击玩家", true, function(value)
+        reachConfig.Targets.Players = value
+    end)
+    
+    reachSection:Toggle("攻击NPC", false, function(value)
+        reachConfig.Targets.NPCs = value
+    end)
+    
+    reachSection:Toggle("队伍检查", false, function(value)
+        reachConfig.TeamCheck = value
+    end)
+end
+
+local playerESP = loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/ESP.lua"))()
+local playerESPTab = menu:Tab("玩家ESP", "6035145364")
+local playerESPSection = playerESPTab:Section("玩家ESP设置", false)
+
+playerESPSection:Toggle("ESP开关", function(value)
+    playerESP.Enabled = value
+end, false)
+
+playerESPSection:Toggle("显示名称", function(value)
+    playerESP.ShowName = value
+end, true)
+
+playerESPSection:Toggle("显示方框", function(value)
+    playerESP.ShowBox = value
+end, false)
+
+playerESPSection:Toggle("显示血量", function(value)
+    playerESP.ShowHealth = value
+end, false)
+
+playerESPSection:Toggle("显示距离", function(value)
+    playerESP.ShowDistance = value
+end, false)
+
+playerESPSection:Toggle("显示射线", function(value)
+    playerESP.ShowTracer = value
+end, false)
+
+playerESPSection:Toggle("队伍颜色", function(value)
+    playerESP.TeamCheck = value
+end, false)
+
+playerESPSection:Toggle("穿墙显示", function(value)
+    playerESP.WallCheck = value
+end, false)
+
+playerESPSection:Toggle("队伍ESP", function(value)
+    playerESP.TeamColor = value
+end, false)
+
+playerESPSection:Dropdown("射线位置", {"上", "中", "下"}, 1, function(value)
+    if value == "上" then
+        playerESP.TracerPosition = "Top"
+    elseif value == "中" then
+        playerESP.TracerPosition = "Middle"
+    elseif value == "下" then
+        playerESP.TracerPosition = "Bottom"
+    end
+end)
+
+playerESPSection:Slider("射线粗细", 1, 0, 10, false, function(value)
+    playerESP.TracerThickness = value
+end)
+
+local npcESPSection = playerESPTab:Section("NPC ESP", false)
+npcESPSection:Toggle("NPC ESP", false, function(value)
+    if value then
+        for model, _ in pairs(npcModels) do
+            ESPLibrary.Add(model, model.Name, Color3.new(1, 1, 1), 15, "NPC")
+        end
+        setmetatable(npcModels, {
+            __newindex = function(t, k, v)
+                if v then
+                    ESPLibrary.Add(k, k.Name, Color3.new(1, 1, 1), 15, "NPC")
+                end
+                rawset(t, k, v)
+            end
+        })
+    else
+        ESPLibrary.Clear("NPC")
+        getmetatable(npcModels).__newindex = nil
+    end
+end)
+
+local miscESPSection = playerESPTab:Section("其他ESP", false)
+miscESPSection:Button("加载通用ESP", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Content/ESP-Universal"))()
+end)
+miscESPSection:Button("加载血量ESP", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/NameHealthESP.lua"))()
+end)
+
+local aimbotTab = menu:Tab("自瞄", "6035145364")
+local aimbotMainSection = aimbotTab:Section("自瞄设置", false)
+
+local aimbotToggleBtn = aimbotMainSection:Toggle("自瞄开关", false, function(value)
+    aimbotConfig.Enabled = value
+    if not value then
+        if fovCircle then fovCircle.Visible = false end
+    else
+        if aimbotConfig.ShowFOV then
+            fovCircle.Visible = true
+        end
+    end
+end)
+
+local smoothnessSlider = aimbotMainSection:Slider("平滑度", 0.6, 0, 1, true, function(value)
+    aimbotConfig.Smoothness = value
+end)
+
+local fovSlider = aimbotMainSection:Slider("FOV范围", 400, 1, 2000, false, function(value)
+    aimbotConfig.MaxDistance = value
+    if fovCircle then fovCircle.Radius = value end
+end)
+
+local aimPartDropdown = aimbotMainSection:Dropdown("瞄准部位", {"Head", "HumanoidRootPart"}, function(value)
+    aimbotConfig.AimPart = value
+end, true, "Head")
+
+aimbotMainSection:Toggle("忽略队友", function(value)
+    aimbotConfig.TeamCheck = value
+end, true)
+
+aimbotMainSection:Toggle("只打敌人", function(value)
+    aimbotConfig.OnlyEnemies = value
+end, false)
+
+aimbotMainSection:Toggle("穿墙自瞄", function(value)
+    aimbotConfig.WallCheck = value
+end, false)
+
+aimbotMainSection:Toggle("显示FOV圆圈", function(value)
+    aimbotConfig.ShowFOV = value
+    if value then
+        fovCircle.Visible = true
+    else
+        if fovCircle then fovCircle.Visible = false end
+    end
+end, false)
+
+aimbotMainSection:Toggle("平滑转向", true)
+
+aimbotMainSection:Toggle("目标切换", false, function(value)
+    aimbotConfig.SwitchTarget = value
+end)
+
+local aimbotFacingToggle = aimbotMainSection:Toggle("对敌转向", false, function(value)
+    aimbotConfig.FacingWhenAimbot = value
+end)
+
+local crosshairToggle = aimbotMainSection:Toggle("准星", false, function(value)
+    crosshairH.Visible = value
+    crosshairV.Visible = value
+end)
+
+local shootBtnToggle = aimbotMainSection:Toggle("射击按钮", false, function(value)
+    shootButton.Visible = value
+end)
+
+local aimbotStatusToggle = aimbotMainSection:Toggle("自瞄状态", false, function(value)
+    aimbotToggle.Visible = value
+end)
+
+local function updateAimbotToggleUI()
+    aimbotToggle.Text = aimbotConfig.Enabled and "ON" or "OFF"
+    aimbotToggle.BackgroundColor3 = aimbotConfig.Enabled and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(255, 0, 0)
+end
+
+addConnection(aimbotToggle.MouseButton1Click:Connect(function()
+    aimbotConfig.Enabled = not aimbotConfig.Enabled
+    updateAimbotToggleUI()
+    aimbotToggleBtn:SetState(aimbotConfig.Enabled)
+end))
+
+updateAimbotToggleUI()
+
+local aimbotDropdown = aimbotMainSection:Dropdown("锁定模式", {"相机", "鼠标", "触摸"}, 1)
+local aimbotFOVPosDropdown = aimbotMainSection:Dropdown("FOV位置", {"准星", "鼠标"}, 1, function(value)
+    aimbotConfig.FovPosition = value
+end)
+
+aimbotMainSection:Toggle("玩家自瞄", true, function(value)
+    aimbotConfig.Targets.Players = value
+end)
+
+aimbotMainSection:Toggle("NPC自瞄", false, function(value)
+    aimbotConfig.Targets.NPCs = value
+end)
+
+aimbotMainSection:Toggle("存活检查", false, function(value)
+    aimbotConfig.AliveCheck = value
+end)
+
+local maxDistanceSlider = aimbotMainSection:Slider("最大距离", 800, 100, 2000, false, function(value)
+    aimbotConfig.MaxDistance = value
+end)
+
+local smoothnessSlider2 = aimbotMainSection:Slider("平滑度", 0.6, 0, 1, true, function(value)
+    aimbotConfig.Smoothness = value
+end)
+
+local predictionSlider = aimbotMainSection:Slider("预判(毫秒)", 150, 0, 500, false, function(value)
+    aimbotConfig.Prediction = value / 1000
+end)
+
+local bulletTrackTab = menu:Tab("子弹追踪", "6035145364")
+local bulletTrackMainSection = bulletTrackTab:Section("子弹追踪设置", false)
+
+local btToggle = bulletTrackMainSection:Toggle("子弹追踪开关", false, function(value)
+    bulletTrackConfig.Enabled = value
+    if not value then
+        if tracerLine then tracerLine.Visible = false end
+    end
+end)
+
+local btMethodDropdown = bulletTrackMainSection:Dropdown("追踪方法", {
+    "Raycast", "FindPartOnRay", "Ray.new", "Mouse.Hit/Target", "Camera.CFrame"
+}, 1, function(value)
+    bulletTrackConfig.Method = value
+end)
+
+local btChanceSlider = bulletTrackMainSection:Slider("命中几率", 100, 0, 100, false, function(value)
+    bulletTrackConfig.HitChance = value
+end)
+
+bulletTrackMainSection:Toggle("穿墙追踪", function(value)
+    bulletTrackConfig.Wallbang = value
+end, false)
+
+bulletTrackMainSection:Toggle("显示目标框", function(value)
+    bulletTrackConfig.ShowTarget = value
+    targetBox.Visible = value
+    targetText.Visible = value
+end, false)
+
+local btBoxSizeSlider = bulletTrackMainSection:Slider("目标框大小", 15, 12, 30, true, function(value)
+    targetBox.Size = UDim2.new(0, value, 0, value)
+end)
+
+bulletTrackMainSection:Toggle("显示追踪线", function(value)
+    flags.TargetLine = value
+end, false)
+
+local weaponModTab = menu:Tab("枪械修改", "6035145364")
+local weaponModSection = weaponModTab:Section("枪械修改", false)
+
+local noRecoilEnabled = false
+local function applyNoRecoil()
+    local gc = getgc(true)
+    for _, obj in pairs(gc) do
+        if type(obj) == "table" then
+            if rawget(obj, "shove") and rawget(obj, "update") then
+                local origShove = obj.shove
+                local origUpdate = obj.update
+                obj.shove = function(...)
+                    if noRecoilEnabled then return end
+                    return origShove(...)
+                end
+                obj.update = function(...)
+                    if noRecoilEnabled then return Vector3.zero end
+                    return origUpdate(...)
+                end
+            end
+            if rawget(obj, "updateClient") then
+                local origUpdateClient = obj.updateClient
+                obj.updateClient = function(...)
+                    if instantAimEnabled and select(-1, ...) then
+                        select(-1, ...).AimInSpeed = 0
+                        select(-1, ...).AimOutSpeed = 0
+                    end
+                    return origUpdateClient(...)
+                end
+            end
+        end
+    end
+end
+
+weaponModSection:Toggle("无后坐力", function(value)
+    noRecoilEnabled = value
+    applyNoRecoil()
+end, false)
+
+local instantAimEnabled = false
+weaponModSection:Toggle("快速开镜", function(value)
+    instantAimEnabled = value
+    applyNoRecoil()
+end, false)
+
+local bulletBoostEnabled = false
+local bulletBoostTask = nil
+local originalBulletAttrs = {}
+
+local function applyBulletBoost()
+    if not bulletBoostEnabled then return end
+    local bulletTypes = ReplicatedStorage:FindFirstChild("AmmoTypes")
+    if bulletTypes then
+        for _, bullet in ipairs(bulletTypes:GetChildren()) do
+            if not originalBulletAttrs[bullet] then
+                originalBulletAttrs[bullet] = {
+                    Drag = bullet:GetAttribute("Drag"),
+                    ProjectileDrop = bullet:GetAttribute("ProjectileDrop")
+                }
+            end
+            bullet:SetAttribute("Drag", 0)
+            bullet:SetAttribute("ProjectileDrop", 0)
+        end
+    end
+end
+
+local function resetBulletBoost()
+    for bullet, attrs in pairs(originalBulletAttrs) do
+        if attrs.Drag then bullet:SetAttribute("Drag", attrs.Drag) end
+        if attrs.ProjectileDrop then bullet:SetAttribute("ProjectileDrop", attrs.ProjectileDrop) end
+    end
+end
+
+weaponModSection:Toggle("子弹修改(无阻力/无下坠)", function(value)
+    bulletBoostEnabled = value
+    if value then
+        applyBulletBoost()
+        if bulletBoostTask then task.cancel(bulletBoostTask) end
+        bulletBoostTask = task.spawn(function()
+            while bulletBoostEnabled do
+                task.wait(0.5)
+                applyBulletBoost()
+            end
+        end)
+        notification("子弹修改", "无阻力 + 无下坠", "Success", 2)
+    else
+        if bulletBoostTask then
+            task.cancel(bulletBoostTask)
+            bulletBoostTask = nil
+        end
+        resetBulletBoost()
+        notification("子弹修改", "已关闭", "Warning", 2)
+    end
+end, false)
+
+local fireRateEnabled = false
+local fireRateValue = 0.5
+local originalFireRates = {}
+local fireRateMap = {}
+local fireRateTask = nil
+
+local function scanFireRate()
+    fireRateMap = {}
+    originalFireRates = {}
+    local gc = getgc(true)
+    local count = 0
+    for _, obj in pairs(gc) do
+        if type(obj) == "table" then
+            for k, v in pairs(obj) do
+                if k == "FireRate" and type(v) == "number" and v > 0 then
+                    fireRateMap[obj] = {key = k}
+                    originalFireRates[obj] = v
+                    count = count + 1
+                end
+            end
+        end
+    end
+    if count > 0 then
+        print("[射速] 扫描到 " .. count .. " 个 FireRate")
+    end
+    return count
+end
+
+local function applyFireRate()
+    if not fireRateEnabled then return end
+    for obj, data in pairs(fireRateMap) do
+        if obj then
+            obj[data.key] = fireRateValue
+        end
+    end
+end
+
+local function resetFireRate()
+    for obj, original in pairs(originalFireRates) do
+        if obj then
+            obj.FireRate = original
+        end
+    end
+end
+
+weaponModSection:Toggle("自定义射速", function(value)
+    fireRateEnabled = value
+    if value then
+        scanFireRate()
+        applyFireRate()
+        if fireRateTask then task.cancel(fireRateTask) end
+        fireRateTask = task.spawn(function()
+            while fireRateEnabled do
+                task.wait(0.5)
+                applyFireRate()
+            end
+        end)
+        notification("射速", "当前射速: " .. fireRateValue .. " 秒/发", "Success", 2)
+    else
+        if fireRateTask then
+            task.cancel(fireRateTask)
+            fireRateTask = nil
+        end
+        resetFireRate()
+        notification("射速", "已恢复原射速", "Warning", 2)
+    end
+end, false)
+
+weaponModSection:Slider("射速(秒/发)", 0.5, 0.001, 0.5, true, function(value)
+    fireRateValue = value
+    if fireRateEnabled then
+        applyFireRate()
+        notification("射速", "射速已改为: " .. value .. " 秒/发", "Info", 1)
+    end
+end)
+
+local fullAutoEnabled = false
+local originalFireModes = {}
+
+local function applyFullAuto()
+    local gc = getgc(true)
+    for _, obj in pairs(gc) do
+        if type(obj) == "table" then
+            for k, v in pairs(obj) do
+                if k == "FireModeIndex" then
+                    if fullAutoEnabled then
+                        obj[k] = 2
+                    else
+                        obj[k] = 1
+                    end
+                end
+            end
+        end
+    end
+end
+
+weaponModSection:Toggle("半自动改全自动", function(value)
+    fullAutoEnabled = value
+    applyFullAuto()
+end, false)
+
+local autoShootTab = menu:Tab("自动射击", "6035145364")
+local autoShootSection = autoShootTab:Section("自动射击 需要开启子追", false)
+
+autoShootSection:Toggle("自动射击", function(value)
+    autoShootEnabled = value
+    if value then
+        if not bulletTrackConfig.Enabled then
+            print("[警告] 子弹追踪未开启！自动射击需要子弹追踪的支持")
+        end
+        print("[自动射击] 已开启 | 当追踪线为绿色时自动开枪")
+    else
+        print("[自动射击] 已关闭")
+    end
+end, false)
+
+autoShootSection:Slider("射击延迟(ms)", 50, 0, 500, true, function(value)
+    autoShootDelay = value
+end)
+
+autoShootSection:Slider("射击概率", 100, 1, 100, true, function(value)
+    autoShootChance = value
+end)
+
+autoShootSection:Toggle("显示击中特效", false, function(value)
+    autoShootShowEffect = value
+end)
+
+local animationTab = menu:Tab("动画区", "6035145364")
+local animationPackSection = animationTab:Section("动画包", false)
+animationPackSection:Label("动画为FE，别人能看见，对没有动画的服务器无效")
+
+local animationPackages = {}
+local animationSearchDropdown = nil
+
+animationPackSection:Textbox("搜索动画包", "Textbox", "", function(value)
+    animationPackages = {}
+    local params = CatalogSearchParams.new()
+    params.SearchKeyword = value
+    params.BundleTypes = {Enum.BundleType.Animations}
+    local results = game:GetService("AvatarEditorService"):SearchCatalog(params)
+    for _, item in results:GetCurrentPage() do
+        animationPackages[item.Id] = item.Name
+    end
+    animationSearchDropdown:SetOptions(animationPackages)
+    notification("XA：提示", "搜索成功", 5)
+end)
+
+animationSearchDropdown = animationPackSection:Dropdown("搜索结果", "Dropdown", {}, function(value)
+    selectedAnimationPackage = value
+end)
+
+animationPackSection:Button("加载动画", function()
+    for id, name in pairs(animationPackages) do
+        if name == selectedAnimationPackage then
+            local function loadOutfit(outfitId)
+                local items = game:GetService("AssetService"):GetBundleDetailsAsync(outfitId).Items
+                for _, item in pairs(items) do
+                    if item.Type == "UserOutfit" then
+                        local description = Players:GetHumanoidDescriptionFromOutfitId(item.Id)
+                        local currentDesc = LocalPlayer.Character.Humanoid:GetAppliedDescription()
+                        local animations = {"ClimbAnimation", "FallAnimation", "IdleAnimation", "JumpAnimation", "RunAnimation", "SwimAnimation", "WalkAnimation"}
+                        for _, anim in pairs(animations) do
+                            currentDesc[anim] = nil
+                        end
+                        LocalPlayer.Character.Humanoid:ApplyDescriptionClientServer(currentDesc)
+                        return
+                    end
+                end
+            end
+        end
+    end
+end)
+
+local function applyAnimation(animId)
+    LocalPlayer.Character.Animate.Disabled = true
+    for _, track in pairs(LocalPlayer.Character.Humanoid:GetPlayingAnimationTracks()) do
+        track:Stop()
+    end
+    LocalPlayer.Character.Animate.idle.Animation1.AnimationId = animId
+    LocalPlayer.Character.Animate.idle.Animation2.AnimationId = animId
+    LocalPlayer.Character.Animate.walk.WalkAnim.AnimationId = animId
+    LocalPlayer.Character.Animate.run.RunAnim.AnimationId = animId
+    LocalPlayer.Character.Animate.jump.JumpAnim.AnimationId = animId
+    LocalPlayer.Character.Animate.climb.ClimbAnim.AnimationId = animId
+    LocalPlayer.Character.Animate.fall.FallAnim.AnimationId = animId
+    LocalPlayer.Character.Humanoid:ChangeState(3)
+    LocalPlayer.Character.Animate.Disabled = false
+end
+
+local animationPresets = {
+    Vampire = "1083445855",
+    Hero = "616111295",
+    Zombie = "616158929",
+    Mage = "707742142",
+    Ghost = "616006778",
+    Elder = "845397899",
+    Astronaut = "891621366",
+    Ninja = "656117400",
+    Werewolf = "1083195517",
+    Cartoon = "742637544",
+    Pirate = "750781874",
+    Sneaky = "1132473842",
+    Toy = "782841498",
+    Knight = "657595757",
+    Confident = "1069977950",
+    Popstar = "1212900985",
+    Princess = "941003647",
+    Cowboy = "1014390418",
+    Patrol = "1149612882",
+    FEZombie = "3489171152"
+}
+
+for name, id in pairs(animationPresets) do
+    animationPackSection:Button(name, function()
+        applyAnimation("http://www.roblox.com/asset/?id=" .. id)
+    end)
+end
+
+local emoteSection = animationTab:Section("动画Emotes", false)
+local animIdInput = ""
+emoteSection:Textbox("输入动画ID", "Textbox", "", function(value)
+    local id = string.match(value, "id=(%d+)")
+    if id then
+        animIdInput = id
+    elseif not value:find("rbxassetid://") then
+        animIdInput = "rbxassetid://" .. value
+    end
+end)
+
+emoteSection:Button("播放动画", function()
+    local anim = Instance.new("Animation")
+    anim.AnimationId = animIdInput
+    local track = LocalPlayer.Character.Humanoid:LoadAnimation(anim)
+    track.Looped = flags.AnimationLooped
+    track:Play()
+    track:AdjustSpeed(flags.AnimationSpeed)
+end)
+
+emoteSection:Button("停止播放所有动画", function()
+    for _, track in pairs(LocalPlayer.Character.Humanoid:GetPlayingAnimationTracks()) do
+        track:Stop()
+    end
+end)
+
+emoteSection:Toggle("是否循环", "AnimationLooped", false)
+emoteSection:Slider("动画播放速度", "AnimationSpeed", 1, 0, 10, false, function(value)
+    for _, track in pairs(LocalPlayer.Character.Humanoid:GetPlayingAnimationTracks()) do
+        track:AdjustSpeed(value)
+    end
+end)
+
+emoteSection:Toggle("循环动画播放速度", "EnableAnimSpeed", false, function(value)
+    while flags.EnableAnimSpeed do
+        task.wait()
+        for _, track in pairs(LocalPlayer.Character.Humanoid:GetPlayingAnimationTracks()) do
+            track:AdjustSpeed(flags.AnimationSpeed)
+        end
+    end
+end)
+
+emoteSection:Button("EmotesGui", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Content/EmotesGui.lua"))()(screenGui)
+end)
+
+emoteSection:Button("JerkOff工具", function()
+    local anim = Instance.new("Animation")
+    anim.AnimationId = LocalPlayer.Character.Humanoid.RigType == Enum.HumanoidRigType.R15 and "rbxassetid://698251653" or "rbxassetid://72042024"
+    local tool = Instance.new("Tool")
+    tool.Name = "Jerk"
+    tool.RequiresHandle = false
+    tool.Parent = LocalPlayer:WaitForChild("Backpack")
+    local equipped = false
+    local currentTrack = nil
+    
+    local function stopAnim()
+        if currentTrack then
+            currentTrack:Stop()
+            currentTrack:Destroy()
+        end
+    end
+    
+    tool.Equipped:Connect(function()
+        equipped = true
+        currentTrack = LocalPlayer.Character.Humanoid:LoadAnimation(anim)
+        currentTrack.Priority = Enum.AnimationPriority.Action
+        currentTrack:Play()
+        currentTrack:AdjustSpeed(0.7)
+        task.spawn(function()
+            while equipped do
+                if currentTrack and currentTrack.TimePosition >= 0.7 then
+                    currentTrack.TimePosition = 0.6
+                end
+                task.wait(0.05)
+            end
+        end)
+    end)
+    
+    tool.Unequipped:Connect(function()
+        equipped = false
+        stopAnim()
+    end)
+    
+    LocalPlayer.Character.Humanoid.Died:Connect(function()
+        equipped = false
+        stopAnim()
+    end)
+end)
+
+local gameAnimations = {}
+local gameAnimDropdown = nil
+
+task.spawn(function()
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("Animation") then
+            gameAnimations[obj.Name] = obj
+        end
+    end
+end)
+
+local gameAnimSection = animationTab:Section("游戏中的动画", false)
+gameAnimDropdown = gameAnimSection:Dropdown("选择动画", "SelectAnimation", gameAnimations)
+
+gameAnimSection:Button("播放动画", function()
+    local anim = LocalPlayer.Character.Humanoid:LoadAnimation(gameAnimations[flags.SelectAnimation])
+    anim.Looped = flags.AnimationLooped
+    anim:Play()
+    anim:AdjustSpeed(flags.AnimationSpeed)
+end)
+
+gameAnimSection:Button("复制动画ID", function()
+    setclipboard(gameAnimations[flags.SelectAnimation].AnimationId)
+end)
+
+gameAnimSection:Button("刷新列表", function()
+    local newAnims = {}
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("Animation") then
+            newAnims[obj.Name] = obj
+        end
+    end
+    gameAnimDropdown:SetOptions(newAnims)
+end)
+
+local playingAnimSection = animationTab:Section("正在播放的动画", false)
+local playerDropdownAnim = playingAnimSection:Dropdown("选择玩家", "Dropdown", getPlayerList(), function(value)
+    selectedAnimPlayer = value
+end)
+
+addConnection(Players.PlayerAdded:Connect(function(player)
+    if playerDropdownAnim then
+        playerDropdownAnim:AddOption(player.Name)
+    end
+end))
+
+addConnection(Players.PlayerRemoving:Connect(function(player)
+    if playerDropdownAnim then
+        playerDropdownAnim:RemoveOption(player.Name)
+    end
+end))
+
+local animListDropdown = playingAnimSection:Dropdown("正在播放动画列表", "Dropdown", {}, function(value)
+    selectedPlayingAnim = value
+end)
+
+playingAnimSection:Button("播放动画", function()
+    local anim = Instance.new("Animation")
+    anim.AnimationId = selectedPlayingAnim
+    local track = LocalPlayer.Character.Humanoid:LoadAnimation(anim)
+    track.Looped = flags.AnimationLooped
+    track:Play()
+    track:AdjustSpeed(flags.AnimationSpeed)
+end)
+
+playingAnimSection:Button("复制动画ID", function()
+    setclipboard(selectedPlayingAnim)
+end)
+
+playingAnimSection:Button("刷新列表", function()
+    animListDropdown:SetOptions({})
+    if selectedAnimPlayer then
+        local player = Players[selectedAnimPlayer]
+        if player and player.Character then
+            local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                for _, track in pairs(humanoid:GetPlayingAnimationTracks()) do
+                    animListDropdown:AddOption(track.Animation.AnimationId)
+                end
+            end
+        end
+    end
+end)
+
+local settingsTab = menu:Tab("设置", "6035145364")
+local settingsSection = settingsTab:Section("界面设置", false)
+
+settingsSection:Textbox("透明度", "Textbox", "0.8", function(value)
+    local alpha = tonumber(value) or 0.8
+    UI.Gui.Main.BackgroundTransparency = alpha
+    UI.Gui.Main.SB.BackgroundTransparency = alpha
+    UI.Gui.Main.SB.Side.BackgroundTransparency = alpha
+end)
+
+settingsSection:Keybind("菜单键", "Keybind", Enum.KeyCode.RightControl, function(value)
+    UI.ToggleKeybind = Enum.KeyCode[value]
+end)
+
+settingsSection:Button("重设菜单位置", function()
+    UI.Gui.Open.Position = UDim2.new(0.00829315186, 0, 0.31107837, 0)
+end)
+
+local toolsSection = settingsTab:Section("工具", false)
+toolsSection:Button("Dex Explorer", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Tools/DexMobile.lua"))()
+end)
+toolsSection:Button("Simple Spy", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/refs/heads/main/Tools/SimpleSpy.lua"))()
+end)
+toolsSection:Button("Hydroxide", function()
+    local repo = "Hosvile"
+    local branch = "revision"
+    local function loadScript(name)
+        local url = string.format("https://raw.githubusercontent.com/%s/MC-Hydroxide/%s/%s.lua", repo, branch, name)
+        return loadstring(game:HttpGetAsync(url), name .. ".lua")()
+    end
+    loadScript("init")
+    loadScript("ui/main")
+end)
+toolsSection:Button("UNC检测", function()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/Xingtaiduan/Script/main/Tools/UNCTest.lua"))()
+end)
+toolsSection:Button("反踢", function()
+    local oldKick = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if self == LocalPlayer and method:lower() == "kick" then
+            StarterGui:SetCore("SendNotification", {Title = "提示", Text = "成功拦截踢出"})
+            warn(debug.traceback())
+            return coroutine.yield()
+        end
+        return oldKick(self, ...)
+    end))
+    hookfunction(LocalPlayer.Kick, function(...)
+        StarterGui:SetCore("SendNotification", {Title = "提示", Text = "成功拦截踢出"})
+        warn(debug.traceback())
+        return coroutine.yield()
+    end)
+    game.GuiService.ErrorMessageChanged:Connect(function(msg)
+        game.GuiService:ClearError()
+        print("Kick Has Occured: " .. msg)
+    end)
+end)
+
+local miscSection = settingsTab:Section("杂项", false)
+
+miscSection:Toggle("掉线警告", false, function(value)
+    while flags.PingWarning do
+        task.wait()
+        if tick() - pingStartTime > 5 and not pingWarned then
+            notification("XA：警告", "您可能已经掉线", 5)
+            pingWarned = true
+        end
+    end
+end)
+
+miscSection:Toggle("XA用户ESP", false, function(value)
+    _G.XAUserESP = value
+    if value then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player:IsInGroup(35310933) then
+                ESPLibrary.Add(player.Character, "XA用户" .. player.Name, Color3.fromRGB(255, 255, 255), 10, "XAUserESP")
+                player.CharacterAdded:Connect(function()
+                    if _G.XAUserESP then
+                        ESPLibrary.Add(player.Character, "XA用户" .. player.Name, Color3.fromRGB(255, 255, 255), 10, "XAUserESP")
+                    end
+                end)
+            end
+        end
+        local playerAddedConn
+        playerAddedConn = Players.PlayerAdded:Connect(function(player)
+            if player ~= LocalPlayer and player:IsInGroup(35310933) then
+                ESPLibrary.Add(player.Character, "XA用户" .. player.Name, Color3.fromRGB(255, 255, 255), 10, "XAUserESP")
+                player.CharacterAdded:Connect(function()
+                    if _G.XAUserESP then
+                        ESPLibrary.Add(player.Character, "XA用户" .. player.Name, Color3.fromRGB(255, 255, 255), 10, "XAUserESP")
+                    end
+                end)
+            end
+        end)
+    else
+        ESPLibrary.Clear("XAUserESP")
+        if playerAddedConn then playerAddedConn:Disconnect() end
+    end
+end)
+
+miscSection:Toggle("显示FPS", false, function(value)
+    if value then
+        local fpsGui = Instance.new("ScreenGui", CoreGui)
+        fpsGui.Name = "FPSGui"
+        fpsGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        local fpsLabel = Instance.new("TextLabel", fpsGui)
+        fpsLabel.Name = "Fps"
+        fpsLabel.BackgroundTransparency = 1
+        fpsLabel.Position = UDim2.new(0.78, 0, 0, 0)
+        fpsLabel.Size = UDim2.new(0, 130, 0, 30)
+        fpsLabel.Font = Enum.Font.SourceSans
+        fpsLabel.Text = "FPS: 0"
+        fpsLabel.TextSize = 14
+        fpsLabel.TextColor3 = Color3.new(1, 1, 1)
+        local frameCount = 0
+        RunService.RenderStepped:Connect(function(dt)
+            frameCount = frameCount + 1
+            if frameCount >= 10 then
+                fpsLabel.Text = "FPS: " .. math.floor(1 / dt)
+                frameCount = 0
+            end
+        end)
+    else
+        if CoreGui:FindFirstChild("FPSGui") then
+            CoreGui.FPSGui:Destroy()
+        end
+    end
+end)
+
+miscSection:Toggle("显示网络拥有者", false, function(value)
+    settings().Physics.AreOwnersShown = value
+end)
+
+miscSection:Textbox("延迟补偿", "Textbox", "", function(value)
+    settings().Network.IncomingReplicationLag = math.huge
+end)
+
+miscSection:Textbox("发送消息", "Textbox", "", function(value)
+    messageToSend = value
+end)
+
+miscSection:Button("发送", function()
+    sendMessage(messageToSend, true, false)
+end)
+
+miscSection:Button("记录CFrame", function()
+    savedCFrame = LocalPlayer.Character.HumanoidRootPart.CFrame
+end)
+
+miscSection:Button("传送到记录点", function()
+    if savedCFrame then
+        LocalPlayer.Character:PivotTo(savedCFrame)
+    else
+        notification("XA：错误", "没有检测到位置", 5)
+    end
+end)
+
+miscSection:Button("打开控制台", function()
+    StarterGui:SetCore("DevConsoleVisible", true)
+end)
+
+miscSection:Button("解锁FPS", function()
+    setfpscap(120)
+end)
+
+miscSection:Button("关闭游戏", function()
+    game:Shutdown()
+end)
+
+local suggestionTab = menu:Tab("反馈建议", "6035145364")
+local suggestionSection = suggestionTab:Section("反馈建议", true)
+
+local lastSuggestionTime = 0
+local suggestionCooldown = 15
+
+suggestionSection:Textbox("请输入您的建议", "Textbox", "", function(value)
+    if value == "" then
+        return notification("提示", "请输入内容后再尝试", 5)
+    end
+    if tick() - lastSuggestionTime < suggestionCooldown then
+        return notification("提示", "你只能每15秒发送一次", 5)
+    end
+    lastSuggestionTime = tick()
+    
+    local data = {
+        embeds = {{
+            color = 65280,
+            fields = {
+                {name = "用户", value = LocalPlayer.Name},
+                {name = "建议", value = value}
+            }
+        }}
+    }
+    
+    request({
+        Url = "https://discord.com/api/webhooks/1380956596691144865/D0TKd1ohAUdrGboCK9DsbuXdx3caDgkqCg6JCjD3WWNffasp5jWY9hjM4YuI5k1_kVp3",
+        Method = "POST",
+        Headers = {["Content-Type"] = "application/json"},
+        Body = HttpService:JSONEncode(data)
+    })
+    
+    notification("提示", "发送成功", 5)
+    task.wait(15)
+end)
+
+suggestionSection:Label("XA Hub 交流群: 1057545155")
+suggestionSection:Button("复制群号", function()
+    setclipboard("1057545155")
+end)
+
+suggestionSection:Label("版本: Beta-4.7.1")
+suggestionSection:Label("加载耗时: " .. string.format("%.2f", tick() - (TimeStart or tick())) .. " 秒")
+
+notification("XA：提示", "脚本加载完成", 5)
+print("脚本加载完成，按 RightControl 打开菜单，点击按钮执行功能")
+
+cleanup()
